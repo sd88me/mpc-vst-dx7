@@ -3,12 +3,17 @@
 **DX7 (Dexed)** — a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
 Force), loaded by MPC's built-in JUCE plugin host with a native touchscreen skin (Q-Links included).
 
-6-operator FM synthesis via [schwung-dx7](https://github.com/charlesvestal/schwung-dx7) (a
-`plugin_api_v2` build of the Dexed/MSFA engine, originally written for Ableton Move), wrapped as an
-MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling. The touchscreen skin and cyan/slate
-DX7-editor theme are ported from [force-dx7](https://github.com/sd88me/force-dx7)'s Force Shadow
-page — this repo is purely the VST port; `force-dx7` remains the separate MockbaMod/Force Shadow
-addon for the Force's own on-device app (not a VST, no plugin host involved).
+6-operator FM synthesis via a vendored copy of [schwung-dx7](https://github.com/charlesvestal/schwung-dx7)
+(a `plugin_api_v2` build of the Dexed/MSFA engine, originally written for Ableton Move — see
+`src/VENDORED.md` for exactly what's vendored, from which commit, and our one local source change),
+wrapped as an MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling. The touchscreen skin and
+cyan/slate DX7-editor theme are ported from [force-dx7](https://github.com/sd88me/force-dx7)'s Force
+Shadow page — this repo is purely the VST port; `force-dx7` remains the separate MockbaMod/Force
+Shadow addon for the Force's own on-device app (not a VST, no plugin host involved).
+
+This repo is fully self-contained: no third-party source is fetched at build time. The only external
+dependency is a sibling checkout of `mpc-vst-plugins` for the shared wrapper/build tooling, same as
+every port in that ecosystem.
 
 ## Build
 
@@ -21,11 +26,8 @@ Docker (with QEMU for arm32v7) and a `force-shadow` checkout are needed transiti
 ./build.sh
 ```
 
-Clones `schwung-dx7` into `.scratch/schwung-dx7` (gitignored) on first run, applies
-`patches/schwung-dx7-multibank-syx.patch` (adds support for multi-bank "ROM" `.syx` cart dumps —
-stock schwung-dx7 only understands one 4104-byte bank per file), and builds via
-`mpc-vst-plugins/tools/build_port.sh`. Output in `build/`: `dx7_dexed.so`, the skin folder, and
-`pluginlist-entry.xml`.
+Builds the vendored `src/dsp/` via `mpc-vst-plugins/tools/build_port.sh` — no network fetch. Output
+in `build/`: `dx7_dexed.so`, the skin folder, and `pluginlist-entry.xml`.
 
 ## Install (just want it working on your MPC/Force)
 
@@ -52,7 +54,7 @@ a manual/no-script install path are in the zip's own `INSTALL.md`.
 Builds, generates an offline skin preview (`build/preview_*.png` — look at these before shipping),
 and packages everything via `mpc-vst-plugins/tools/release.py` into
 `dist/DX7-Dexed-<version>-mpc-armv7.zip`: the `.so`, the skin, a default `dx7_carts` bank folder
-(schwung-dx7's own factory banks), `install.sh`/`uninstall.sh`, a generated `INSTALL.md` and
+(`banks/`, schwung-dx7's own vendored factory banks), `install.sh`/`uninstall.sh`, a generated `INSTALL.md` and
 `SHA256SUMS`. See `mpc-vst-plugins/docs/RELEASING.md` for the full checklist (device smoke test
 before publishing, versioning rules, `gh release create`).
 

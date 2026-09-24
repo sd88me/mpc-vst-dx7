@@ -1,0 +1,2448 @@
+/*
+ * Dexed Synth DSP Plugin
+ *
+ * Uses msfa (Music Synthesizer for Android) FM engine from Dexed.
+ * Provides 6-operator FM synthesis with DX7-compatible patch support.
+ *
+ * V2 API only - instance-based for multi-instance support.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <memory>
+#include <dirent.h>
+
+/* Include plugin API */
+extern "C" {
+/* Copy plugin_api_v1.h definitions inline to avoid path issues */
+#include <stdint.h>
+
+#define MOVE_PLUGIN_API_VERSION 1
+#define MOVE_SAMPLE_RATE 44100
+#define MOVE_FRAMES_PER_BLOCK 128
+#define MOVE_MIDI_SOURCE_INTERNAL 0
+#define MOVE_MIDI_SOURCE_EXTERNAL 2
+
+typedef struct host_api_v1 {
+    uint32_t api_version;
+    int sample_rate;
+    int frames_per_block;
+    uint8_t *mapped_memory;
+    int audio_out_offset;
+    int audio_in_offset;
+    void (*log)(const char *msg);
+    int (*midi_send_internal)(const uint8_t *msg, int len);
+    int (*midi_send_external)(const uint8_t *msg, int len);
+} host_api_v1_t;
+
+/* Plugin API v2 - Instance-based for multi-instance support */
+#define MOVE_PLUGIN_API_VERSION_2 2
+
+typedef struct plugin_api_v2 {
+    uint32_t api_version;
+    void* (*create_instance)(const char *module_dir, const char *json_defaults);
+    void (*destroy_instance)(void *instance);
+    void (*on_midi)(void *instance, const uint8_t *msg, int len, int source);
+    void (*set_param)(void *instance, const char *key, const char *val);
+    int (*get_param)(void *instance, const char *key, char *buf, int buf_len);
+    int (*get_error)(void *instance, char *buf, int buf_len);
+    void (*render_block)(void *instance, int16_t *out_interleaved_lr, int frames);
+} plugin_api_v2_t;
+}
+
+/* msfa FM engine */
+#include "msfa/synth.h"
+#include "msfa/fm_core.h"
+#include "msfa/dx7note.h"
+#include "msfa/lfo.h"
+#include "msfa/env.h"
+#include "msfa/exp2.h"
+#include "msfa/sin.h"
+#include "msfa/freqlut.h"
+#include "msfa/pitchenv.h"
+#include "msfa/porta.h"
+#include "msfa/tuning.h"
+
+/* Constants */
+#define MAX_VOICES 16
+#define DX7_PATCH_SIZE 156   /* Size of unpacked DX7 voice data */
+#define DX7_PACKED_SIZE 128  /* Size of packed DX7 voice in .syx */
+#define MAX_PATCHES 128
+#define MAX_SYX_BANKS 999
+
+/* Bank entry for .syx file browsing. One physical .syx FILE can contain more than one
+ * logical 4104-byte DX7 bank back-to-back (a "ROM" cart dump, e.g. a 131328-byte file =
+ * 32 banks x 4104 bytes) -- sub_index is which 4104-byte slice within the file this entry
+ * is, so each logical bank still gets its own browsable syx_banks[] entry. */
+typedef struct {
+    char path[512];
+    char name[128];
+    int sub_index;
+} syx_bank_entry_t;
+
+/* Host API reference */
+static const host_api_v1_t *g_host = NULL;
+
+/* Helper: log via host */
+static void plugin_log(const char *msg) {
+    if (g_host && g_host->log) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "[dexed] %s", msg);
+        g_host->log(buf);
+    }
+}
+
+/* Unpack a 128-byte packed DX7 voice to 156-byte format */
+static void unpack_patch(const uint8_t *packed, uint8_t *unpacked) {
+    /* Operators 1-6 - same order as Dexed (no reversal) */
+    for (int op = 0; op < 6; op++) {
+        int p = op * 17;  /* packed offset */
+        int u = op * 21;  /* unpacked offset - same order as packed */
+
+        /* EG rates */
+        unpacked[u + 0] = packed[p + 0] & 0x7f;
+        unpacked[u + 1] = packed[p + 1] & 0x7f;
+        unpacked[u + 2] = packed[p + 2] & 0x7f;
+        unpacked[u + 3] = packed[p + 3] & 0x7f;
+
+        /* EG levels */
+        unpacked[u + 4] = packed[p + 4] & 0x7f;
+        unpacked[u + 5] = packed[p + 5] & 0x7f;
+        unpacked[u + 6] = packed[p + 6] & 0x7f;
+        unpacked[u + 7] = packed[p + 7] & 0x7f;
+
+        /* Keyboard scaling */
+        unpacked[u + 8] = packed[p + 8] & 0x7f;    /* BP */
+        unpacked[u + 9] = packed[p + 9] & 0x7f;    /* LD */
+        unpacked[u + 10] = packed[p + 10] & 0x7f;  /* RD */
+        unpacked[u + 11] = packed[p + 11] & 0x03;  /* LC */
+        unpacked[u + 12] = (packed[p + 11] >> 2) & 0x03;  /* RC */
+
+        /* Other */
+        unpacked[u + 13] = (packed[p + 12] >> 0) & 0x07;  /* Rate scaling */
+        unpacked[u + 14] = (packed[p + 13] >> 0) & 0x03;  /* Amp mod sens */
+        unpacked[u + 15] = (packed[p + 13] >> 2) & 0x07;  /* Key vel sens */
+        unpacked[u + 16] = packed[p + 14] & 0x7f;  /* Output level */
+        unpacked[u + 17] = (packed[p + 15] >> 0) & 0x01;  /* Osc mode */
+        unpacked[u + 18] = (packed[p + 15] >> 1) & 0x1f;  /* Freq coarse */
+        unpacked[u + 19] = packed[p + 16] & 0x7f;  /* Freq fine */
+        unpacked[u + 20] = (packed[p + 12] >> 3) & 0x0f;  /* Detune */
+    }
+
+    /* Global parameters (offset 102 in packed) */
+    int p = 102;
+
+    /* Pitch EG */
+    unpacked[126] = packed[p + 0] & 0x7f;
+    unpacked[127] = packed[p + 1] & 0x7f;
+    unpacked[128] = packed[p + 2] & 0x7f;
+    unpacked[129] = packed[p + 3] & 0x7f;
+    unpacked[130] = packed[p + 4] & 0x7f;
+    unpacked[131] = packed[p + 5] & 0x7f;
+    unpacked[132] = packed[p + 6] & 0x7f;
+    unpacked[133] = packed[p + 7] & 0x7f;
+
+    /* Algorithm: byte 110, bits 0-4 */
+    unpacked[134] = packed[p + 8] & 0x1f;
+    /* Feedback: byte 111, bits 0-2 */
+    unpacked[135] = packed[p + 9] & 0x07;
+    /* Osc Key Sync: byte 111, bit 3 */
+    unpacked[136] = (packed[p + 9] >> 3) & 0x01;
+
+    /* LFO */
+    unpacked[137] = packed[p + 10] & 0x7f;  /* Speed */
+    unpacked[138] = packed[p + 11] & 0x7f;  /* Delay */
+    unpacked[139] = packed[p + 12] & 0x7f;  /* PMD */
+    unpacked[140] = packed[p + 13] & 0x7f;  /* AMD */
+    /* Byte 116: bit 0 = LFO sync, bits 1-3 = LFO wave, bits 4-6 = LFO PMS */
+    unpacked[141] = packed[p + 14] & 0x01;          /* LFO sync (bit 0) */
+    unpacked[142] = (packed[p + 14] >> 1) & 0x07;   /* LFO wave (bits 1-3) */
+    unpacked[143] = (packed[p + 14] >> 4) & 0x07;   /* LFO PMS (bits 4-6) */
+
+    /* Transpose */
+    unpacked[144] = packed[p + 15] & 0x7f;
+
+    /* Name (10 chars) */
+    for (int i = 0; i < 10; i++) {
+        unpacked[145 + i] = packed[p + 16 + i] & 0x7f;
+    }
+}
+
+/* ========================================================================
+ * PLUGIN API V2 - INSTANCE-BASED (for multi-instance support)
+ * ======================================================================== */
+
+/* v2 instance structure */
+typedef struct {
+    /* Module path */
+    char module_dir[512];
+
+    /* Preset state */
+    int current_preset;
+    int preset_count;
+    int octave_transpose;
+    char patch_path[512];
+    char patch_name[128];
+    int active_voices;
+    int output_level;
+
+    /* Bank management */
+    syx_bank_entry_t syx_banks[MAX_SYX_BANKS];
+    int syx_bank_count;
+    int syx_bank_index;
+
+    /* DX7 patch parameters (editable in realtime) */
+    int algorithm;      /* Editable (0-31) */
+    int feedback;       /* Editable (0-7) */
+    int lfo_speed;      /* Editable (0-99) */
+    int lfo_delay;      /* Editable (0-99) */
+    int lfo_pmd;        /* Editable (0-99) pitch mod depth */
+    int lfo_amd;        /* Editable (0-99) amp mod depth */
+    int lfo_wave;       /* Editable (0-5) */
+
+    /* Per-operator parameters */
+    int op_levels[6];   /* Editable (0-99) output level */
+    int op_coarse[6];   /* Editable (0-31) frequency coarse */
+    int op_fine[6];     /* Editable (0-99) frequency fine */
+    int op_detune[6];   /* Editable (0-14, displayed as -7 to +7) */
+    int op_eg_r1[6];    /* Editable (0-99) EG rate 1 (attack) */
+    int op_eg_r2[6];    /* Editable (0-99) EG rate 2 (decay 1) */
+    int op_eg_r3[6];    /* Editable (0-99) EG rate 3 (decay 2) */
+    int op_eg_r4[6];    /* Editable (0-99) EG rate 4 (release) */
+    int op_eg_l1[6];    /* Editable (0-99) EG level 1 */
+    int op_eg_l2[6];    /* Editable (0-99) EG level 2 */
+    int op_eg_l3[6];    /* Editable (0-99) EG level 3 (sustain) */
+    int op_eg_l4[6];    /* Editable (0-99) EG level 4 */
+    int op_vel_sens[6]; /* Editable (0-7) velocity sensitivity */
+    int op_amp_mod[6];  /* Editable (0-3) amp mod sensitivity */
+    int op_osc_mode[6]; /* Editable (0-1) 0=ratio, 1=fixed */
+    int op_rate_scale[6]; /* Editable (0-7) rate scaling */
+    int op_key_bp[6];   /* Editable (0-99) keyboard breakpoint */
+    int op_key_ld[6];   /* Editable (0-99) left depth */
+    int op_key_rd[6];   /* Editable (0-99) right depth */
+    int op_key_lc[6];   /* Editable (0-3) left curve */
+    int op_key_rc[6];   /* Editable (0-3) right curve */
+
+    /* Global parameters */
+    int pitch_eg_r1;    /* Editable (0-99) pitch EG rate 1 */
+    int pitch_eg_r2;    /* Editable (0-99) pitch EG rate 2 */
+    int pitch_eg_r3;    /* Editable (0-99) pitch EG rate 3 */
+    int pitch_eg_r4;    /* Editable (0-99) pitch EG rate 4 */
+    int pitch_eg_l1;    /* Editable (0-99) pitch EG level 1 */
+    int pitch_eg_l2;    /* Editable (0-99) pitch EG level 2 */
+    int pitch_eg_l3;    /* Editable (0-99) pitch EG level 3 */
+    int pitch_eg_l4;    /* Editable (0-99) pitch EG level 4 */
+    int osc_sync;       /* Editable (0-1) oscillator sync */
+    int lfo_sync;       /* Editable (0-1) LFO key sync */
+    int lfo_pms;        /* Editable (0-7) LFO pitch mod sensitivity */
+    int transpose;      /* Editable (0-48) transpose, 24=middle C */
+
+    /* Tuning */
+    std::shared_ptr<TuningState> tuning;
+
+    /* Controllers */
+    Controllers controllers;
+
+    /* FM core and LFO */
+    FmCore fm_core;
+    Lfo lfo;
+
+    /* Voices */
+    Dx7Note* voices[MAX_VOICES];
+    int voice_note[MAX_VOICES];
+    int voice_velocity[MAX_VOICES];
+    int voice_age[MAX_VOICES];
+    bool voice_sustained[MAX_VOICES];
+    int age_counter;
+    bool sustain_pedal;
+
+    /* Patches */
+    uint8_t current_patch[DX7_PATCH_SIZE];
+    uint8_t patches[MAX_PATCHES][DX7_PATCH_SIZE];
+    char patch_names[MAX_PATCHES][11];
+
+    /* Render buffer */
+    int32_t render_buffer[N];
+
+    /* Load error state */
+    char load_error[256];
+} dx7_instance_t;
+
+/* v2: Initialize default patch */
+static void v2_init_default_patch(dx7_instance_t *inst) {
+    memset(inst->current_patch, 0, DX7_PATCH_SIZE);
+
+    /* Set up a simple init patch - OP1 (carrier in algorithm 1) with a sine wave
+     * Note: DX7 sysex has OP6 at byte 0, OP1 at byte 105. Here op=5 means OP1. */
+    for (int op = 0; op < 6; op++) {
+        int base = op * 21;
+        /* EG rates */
+        inst->current_patch[base + 0] = 99;  /* R1 */
+        inst->current_patch[base + 1] = 99;  /* R2 */
+        inst->current_patch[base + 2] = 99;  /* R3 */
+        inst->current_patch[base + 3] = 99;  /* R4 */
+        /* EG levels */
+        inst->current_patch[base + 4] = 99;  /* L1 */
+        inst->current_patch[base + 5] = 99;  /* L2 */
+        inst->current_patch[base + 6] = 99;  /* L3 */
+        inst->current_patch[base + 7] = 0;   /* L4 */
+        /* Other params - byte offsets: 16=level, 17=osc_mode, 20=detune */
+        inst->current_patch[base + 16] = (op == 5) ? 99 : 0;  /* Output level - only op6 on */
+        inst->current_patch[base + 17] = 0;  /* Oscillator mode = ratio */
+        inst->current_patch[base + 20] = 7;  /* Detune = 0 (stored as 7, displayed as 0) */
+    }
+
+    /* Algorithm = 1 */
+    inst->current_patch[134] = 0;
+    /* Feedback = 0 */
+    inst->current_patch[135] = 0;
+    /* LFO settings */
+    inst->current_patch[137] = 35;  /* LFO speed */
+    inst->current_patch[138] = 0;   /* LFO delay */
+    inst->current_patch[139] = 0;   /* LFO PMD */
+    inst->current_patch[140] = 0;   /* LFO AMD */
+    inst->current_patch[143] = 24;  /* Transpose */
+
+    strncpy(inst->patch_name, "Init", sizeof(inst->patch_name) - 1);
+}
+
+/* v2: Load syx file into instance */
+#define DX7_BANK_FILE_SIZE 4104  /* one standard 32-voice DX7 bank: F0 43 00 09 20 00 + 32*128 + F7 */
+
+/* Loads the 4104-byte bank at byte offset (sub_index * DX7_BANK_FILE_SIZE) within `path`.
+ * A plain single-bank .syx (4104 bytes) is sub_index 0 of a 1-bank file; a multi-bank "ROM"
+ * dump (N*4104 bytes, all banks concatenated back-to-back with no extra header/padding
+ * between them -- the standard DX7 cartridge-dump convention) is sub_index 0..N-1. Callers
+ * are expected to have already validated sub_index against the file's own bank count (see
+ * scan_syx_banks()); this still re-checks defensively rather than trusting the caller. */
+static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
+    char msg[256];
+
+    if (sub_index < 0) {
+        plugin_log("v2_load_syx: negative sub_index");
+        return -1;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(msg, sizeof(msg), "Cannot open syx: %s", path);
+        plugin_log(msg);
+        return -1;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    long offset = (long)sub_index * DX7_BANK_FILE_SIZE;
+    if (size < offset + DX7_BANK_FILE_SIZE) {
+        snprintf(msg, sizeof(msg), "syx bank %d out of range: %s is %ld bytes", sub_index, path, size);
+        plugin_log(msg);
+        fclose(f);
+        return -1;
+    }
+
+    uint8_t *data = (uint8_t *)malloc(DX7_BANK_FILE_SIZE);
+    if (!data) {
+        fclose(f);
+        return -1;
+    }
+
+    fseek(f, offset, SEEK_SET);
+    size_t got = fread(data, 1, DX7_BANK_FILE_SIZE, f);
+    fclose(f);
+    if (got != DX7_BANK_FILE_SIZE) {
+        snprintf(msg, sizeof(msg), "Short read on syx bank %d: %s", sub_index, path);
+        plugin_log(msg);
+        free(data);
+        return -1;
+    }
+
+    /* Verify sysex header: F0 43 00 09 20 00 */
+    if (data[0] != 0xF0 || data[1] != 0x43 || data[3] != 0x09) {
+        snprintf(msg, sizeof(msg), "Invalid DX7 sysex header at bank %d of %s", sub_index, path);
+        plugin_log(msg);
+        free(data);
+        return -1;
+    }
+
+    /* Extract 32 patches starting at offset 6 */
+    inst->preset_count = 32;
+    for (int i = 0; i < 32; i++) {
+        uint8_t *packed = &data[6 + i * 128];
+        unpack_patch(packed, inst->patches[i]);
+
+        /* Extract name */
+        for (int j = 0; j < 10; j++) {
+            char c = inst->patches[i][145 + j];
+            inst->patch_names[i][j] = (c >= 32 && c < 127) ? c : ' ';
+        }
+        inst->patch_names[i][10] = '\0';
+    }
+
+    free(data);
+    strncpy(inst->patch_path, path, sizeof(inst->patch_path) - 1);
+
+    snprintf(msg, sizeof(msg), "Loaded 32 patches from: %s (bank %d)", path, sub_index);
+    plugin_log(msg);
+
+    return 0;
+}
+
+/* Compare function for sorting banks alphabetically */
+static int bank_entry_cmp(const void *a, const void *b) {
+    const syx_bank_entry_t *ba = (const syx_bank_entry_t *)a;
+    const syx_bank_entry_t *bb = (const syx_bank_entry_t *)b;
+    return strcasecmp(ba->name, bb->name);
+}
+
+/* Scan banks directory for .syx files. This MPC VST port's MODULE_DIR (vst.json's "defines")
+ * points directly at the cart folder itself (e.g. /sdcard/vst/dx7_carts), not at a parent
+ * folder with its own "banks" subfolder -- unlike stock schwung-dx7's Move convention. */
+static void scan_syx_banks(dx7_instance_t *inst) {
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s", inst->module_dir);
+
+    inst->syx_bank_count = 0;
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        const char *ext = strrchr(entry->d_name, '.');
+        if (!ext || strcasecmp(ext, ".syx") != 0) continue;
+        if (inst->syx_bank_count >= MAX_SYX_BANKS) {
+            plugin_log("syx bank list full, skipping extras");
+            break;
+        }
+
+        char full_path[600];
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+
+        /* Size the file to find out how many back-to-back 4104-byte banks it holds -- a
+         * plain single bank (n=1) or a "ROM" cart dump with several banks concatenated with
+         * no header between them (n>1, e.g. a 131328-byte file = 32 banks). A size that
+         * isn't an exact multiple of DX7_BANK_FILE_SIZE isn't a valid DX7 bank file at all
+         * (truncated/corrupt/unrelated) -- skip it, don't add a broken entry. */
+        FILE *sf = fopen(full_path, "rb");
+        if (!sf) continue;
+        fseek(sf, 0, SEEK_END);
+        long fsize = ftell(sf);
+        fclose(sf);
+        if (fsize <= 0 || fsize % DX7_BANK_FILE_SIZE != 0) {
+            char skipmsg[600];
+            snprintf(skipmsg, sizeof(skipmsg), "Skipping %s: %ld bytes, not a multiple of %d",
+                     entry->d_name, fsize, DX7_BANK_FILE_SIZE);
+            plugin_log(skipmsg);
+            continue;
+        }
+        int n_banks = (int)(fsize / DX7_BANK_FILE_SIZE);
+
+        for (int sub = 0; sub < n_banks && inst->syx_bank_count < MAX_SYX_BANKS; sub++) {
+            syx_bank_entry_t *bank = &inst->syx_banks[inst->syx_bank_count++];
+            strncpy(bank->path, full_path, sizeof(bank->path) - 1);
+            bank->path[sizeof(bank->path) - 1] = '\0';
+            bank->sub_index = sub;
+            /* Display name: filename with .syx/.SYX stripped (matches the original
+             * single-bank-only display convention), plus a "[k/n]" suffix disambiguating
+             * each logical bank when a file holds more than one (a "ROM" cart dump). */
+            char base[128];
+            strncpy(base, entry->d_name, sizeof(base) - 1);
+            base[sizeof(base) - 1] = '\0';
+            char *ext = strrchr(base, '.');
+            if (ext && (strcasecmp(ext, ".syx") == 0)) *ext = '\0';
+            if (n_banks > 1) {
+                snprintf(bank->name, sizeof(bank->name), "%s [%d/%d]", base, sub + 1, n_banks);
+            } else {
+                strncpy(bank->name, base, sizeof(bank->name) - 1);
+                bank->name[sizeof(bank->name) - 1] = '\0';
+            }
+        }
+        if (inst->syx_bank_count >= MAX_SYX_BANKS) {
+            plugin_log("syx bank list full, skipping extras");
+            break;
+        }
+    }
+
+    closedir(dir);
+
+    /* Sort alphabetically */
+    if (inst->syx_bank_count > 1) {
+        qsort(inst->syx_banks, inst->syx_bank_count, sizeof(syx_bank_entry_t), bank_entry_cmp);
+    }
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Found %d syx banks", inst->syx_bank_count);
+    plugin_log(msg);
+}
+
+/* Switch to a specific bank by index */
+static void set_syx_bank_index(dx7_instance_t *inst, int index);
+
+/* Extract DX7 parameters from current patch to instance fields */
+static void extract_patch_params(dx7_instance_t *inst) {
+    /* Global parameters */
+    inst->algorithm = inst->current_patch[134];  /* 0-31 */
+    inst->feedback = inst->current_patch[135];   /* 0-7 */
+    inst->osc_sync = inst->current_patch[136];   /* 0-1 */
+    inst->lfo_speed = inst->current_patch[137];  /* 0-99 */
+    inst->lfo_delay = inst->current_patch[138];  /* 0-99 */
+    inst->lfo_pmd = inst->current_patch[139];    /* 0-99 */
+    inst->lfo_amd = inst->current_patch[140];    /* 0-99 */
+    inst->lfo_sync = inst->current_patch[141];   /* 0-1 */
+    inst->lfo_wave = inst->current_patch[142];   /* 0-5 */
+    inst->lfo_pms = inst->current_patch[143];    /* 0-7 */
+    inst->transpose = inst->current_patch[144];  /* 0-48 */
+
+    /* Pitch envelope */
+    inst->pitch_eg_r1 = inst->current_patch[126]; /* 0-99 */
+    inst->pitch_eg_r2 = inst->current_patch[127]; /* 0-99 */
+    inst->pitch_eg_r3 = inst->current_patch[128]; /* 0-99 */
+    inst->pitch_eg_r4 = inst->current_patch[129]; /* 0-99 */
+    inst->pitch_eg_l1 = inst->current_patch[130]; /* 0-99 */
+    inst->pitch_eg_l2 = inst->current_patch[131]; /* 0-99 */
+    inst->pitch_eg_l3 = inst->current_patch[132]; /* 0-99 */
+    inst->pitch_eg_l4 = inst->current_patch[133]; /* 0-99 */
+
+    /* Per-operator parameters
+     * DX7 unpacked patch layout per operator (21 bytes each):
+     *   0-3:   EG rates R1-R4
+     *   4-7:   EG levels L1-L4
+     *   8-12:  Keyboard level scaling (BP, LD, RD, LC, RC)
+     *   13:    Rate scaling
+     *   14:    Amp mod sensitivity
+     *   15:    Key velocity sensitivity
+     *   16:    Output level
+     *   17:    Oscillator mode (0=ratio, 1=fixed)
+     *   18:    Freq coarse
+     *   19:    Freq fine
+     *   20:    Detune
+     */
+    /* Note: DX7 sysex stores operators in reverse order:
+     * patch bytes 0-20 = OP6, bytes 105-125 = OP1
+     * We use (5-op)*21 so that op1_* maps to actual OP1 data */
+    for (int op = 0; op < 6; op++) {
+        int base = (5 - op) * 21;
+        /* EG rates */
+        inst->op_eg_r1[op] = inst->current_patch[base + 0];
+        inst->op_eg_r2[op] = inst->current_patch[base + 1];
+        inst->op_eg_r3[op] = inst->current_patch[base + 2];
+        inst->op_eg_r4[op] = inst->current_patch[base + 3];
+        /* EG levels */
+        inst->op_eg_l1[op] = inst->current_patch[base + 4];
+        inst->op_eg_l2[op] = inst->current_patch[base + 5];
+        inst->op_eg_l3[op] = inst->current_patch[base + 6];
+        inst->op_eg_l4[op] = inst->current_patch[base + 7];
+        /* Keyboard scaling */
+        inst->op_key_bp[op] = inst->current_patch[base + 8];
+        inst->op_key_ld[op] = inst->current_patch[base + 9];
+        inst->op_key_rd[op] = inst->current_patch[base + 10];
+        inst->op_key_lc[op] = inst->current_patch[base + 11];
+        inst->op_key_rc[op] = inst->current_patch[base + 12];
+        /* Other */
+        inst->op_rate_scale[op] = inst->current_patch[base + 13];
+        inst->op_amp_mod[op] = inst->current_patch[base + 14];
+        inst->op_vel_sens[op] = inst->current_patch[base + 15];
+        inst->op_levels[op] = inst->current_patch[base + 16];
+        inst->op_osc_mode[op] = inst->current_patch[base + 17];
+        inst->op_coarse[op] = inst->current_patch[base + 18];
+        inst->op_fine[op] = inst->current_patch[base + 19];
+        inst->op_detune[op] = inst->current_patch[base + 20];
+    }
+}
+
+/* Apply instance parameter fields back to current patch and refresh LFO */
+static void apply_patch_params(dx7_instance_t *inst) {
+    /* Apply global params */
+    inst->current_patch[134] = inst->algorithm;
+    inst->current_patch[135] = inst->feedback;
+    inst->current_patch[136] = inst->osc_sync;
+    inst->current_patch[137] = inst->lfo_speed;
+    inst->current_patch[138] = inst->lfo_delay;
+    inst->current_patch[139] = inst->lfo_pmd;
+    inst->current_patch[140] = inst->lfo_amd;
+    inst->current_patch[141] = inst->lfo_sync;
+    inst->current_patch[142] = inst->lfo_wave;
+    inst->current_patch[143] = inst->lfo_pms;
+    inst->current_patch[144] = inst->transpose;
+
+    /* Apply pitch envelope */
+    inst->current_patch[126] = inst->pitch_eg_r1;
+    inst->current_patch[127] = inst->pitch_eg_r2;
+    inst->current_patch[128] = inst->pitch_eg_r3;
+    inst->current_patch[129] = inst->pitch_eg_r4;
+    inst->current_patch[130] = inst->pitch_eg_l1;
+    inst->current_patch[131] = inst->pitch_eg_l2;
+    inst->current_patch[132] = inst->pitch_eg_l3;
+    inst->current_patch[133] = inst->pitch_eg_l4;
+
+    /* Apply per-operator params - use (5-op)*21 to match extract_patch_params */
+    for (int op = 0; op < 6; op++) {
+        int base = (5 - op) * 21;
+        /* EG rates */
+        inst->current_patch[base + 0] = inst->op_eg_r1[op];
+        inst->current_patch[base + 1] = inst->op_eg_r2[op];
+        inst->current_patch[base + 2] = inst->op_eg_r3[op];
+        inst->current_patch[base + 3] = inst->op_eg_r4[op];
+        /* EG levels */
+        inst->current_patch[base + 4] = inst->op_eg_l1[op];
+        inst->current_patch[base + 5] = inst->op_eg_l2[op];
+        inst->current_patch[base + 6] = inst->op_eg_l3[op];
+        inst->current_patch[base + 7] = inst->op_eg_l4[op];
+        /* Keyboard scaling */
+        inst->current_patch[base + 8] = inst->op_key_bp[op];
+        inst->current_patch[base + 9] = inst->op_key_ld[op];
+        inst->current_patch[base + 10] = inst->op_key_rd[op];
+        inst->current_patch[base + 11] = inst->op_key_lc[op];
+        inst->current_patch[base + 12] = inst->op_key_rc[op];
+        /* Other */
+        inst->current_patch[base + 13] = inst->op_rate_scale[op];
+        inst->current_patch[base + 14] = inst->op_amp_mod[op];
+        inst->current_patch[base + 15] = inst->op_vel_sens[op];
+        inst->current_patch[base + 16] = inst->op_levels[op];
+        inst->current_patch[base + 17] = inst->op_osc_mode[op];
+        inst->current_patch[base + 18] = inst->op_coarse[op];
+        inst->current_patch[base + 19] = inst->op_fine[op];
+        inst->current_patch[base + 20] = inst->op_detune[op];
+    }
+
+    /* Update LFO - changes take effect immediately for LFO params */
+    inst->lfo.reset(inst->current_patch + 137);
+
+    /* Update all active voices with new patch parameters */
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (inst->voice_note[i] >= 0 && inst->voices[i]) {
+            inst->voices[i]->update(inst->current_patch, inst->voice_note[i],
+                                    inst->voice_velocity[i], 0);
+        }
+    }
+}
+
+/* v2: Select preset by index */
+static void v2_select_preset(dx7_instance_t *inst, int index) {
+    if (index < 0) index = inst->preset_count - 1;
+    if (index >= inst->preset_count) index = 0;
+
+    /* Release any active voices so they don't ring on the new preset */
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (inst->voice_note[i] >= 0 && inst->voices[i]) {
+            inst->voices[i]->keyup();
+        }
+    }
+
+    inst->current_preset = index;
+    memcpy(inst->current_patch, inst->patches[index], DX7_PATCH_SIZE);
+    strncpy(inst->patch_name, inst->patch_names[index], sizeof(inst->patch_name) - 1);
+
+    /* Extract parameters for editing */
+    extract_patch_params(inst);
+
+    /* Update LFO for new patch */
+    inst->lfo.reset(inst->current_patch + 137);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Preset %d: %s (alg %d)",
+             index, inst->patch_name, inst->current_patch[134] + 1);
+    plugin_log(msg);
+}
+
+/* Switch to a specific bank by index */
+static void set_syx_bank_index(dx7_instance_t *inst, int index) {
+    if (inst->syx_bank_count <= 0) return;
+
+    if (index < 0) index = inst->syx_bank_count - 1;
+    if (index >= inst->syx_bank_count) index = 0;
+
+    inst->syx_bank_index = index;
+    v2_load_syx(inst, inst->syx_banks[index].path, inst->syx_banks[index].sub_index);
+    inst->current_preset = 0;  /* Reset to first patch in new bank */
+    v2_select_preset(inst, 0);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "Switched to bank %d: %s", index, inst->syx_banks[index].name);
+    plugin_log(msg);
+}
+
+/* v2: Allocate a voice using voice stealing */
+static int v2_allocate_voice(dx7_instance_t *inst) {
+    /* First try to find a free voice */
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (inst->voice_note[i] < 0) {
+            return i;
+        }
+    }
+
+    /* No free voice, steal the oldest one */
+    int oldest = 0;
+    int oldest_age = inst->voice_age[0];
+    for (int i = 1; i < MAX_VOICES; i++) {
+        if (inst->voice_age[i] < oldest_age) {
+            oldest = i;
+            oldest_age = inst->voice_age[i];
+        }
+    }
+
+    /* Voice already exists (was allocated at create_instance), just reuse */
+    return oldest;
+}
+
+/* v2: Create instance */
+static void* v2_create_instance(const char *module_dir, const char *json_defaults) {
+    (void)json_defaults;
+
+    dx7_instance_t *inst = new dx7_instance_t();
+    if (!inst) {
+        fprintf(stderr, "Dexed: Failed to allocate instance\n");
+        return NULL;
+    }
+
+    strncpy(inst->module_dir, module_dir, sizeof(inst->module_dir) - 1);
+    inst->current_preset = 0;
+    inst->preset_count = 1;  /* At least init patch */
+    inst->octave_transpose = 0;
+    inst->active_voices = 0;
+    inst->output_level = 50;
+    inst->age_counter = 0;
+    inst->sustain_pedal = false;
+    strncpy(inst->patch_name, "Init", sizeof(inst->patch_name) - 1);
+
+    /* Initialize bank management */
+    inst->syx_bank_count = 0;
+    inst->syx_bank_index = 0;
+    memset(inst->syx_banks, 0, sizeof(inst->syx_banks));
+
+    /* Initialize DX7 parameters to defaults */
+    inst->algorithm = 0;
+    inst->feedback = 0;
+    inst->osc_sync = 1;
+    inst->transpose = 24;  /* Middle C */
+    inst->lfo_speed = 35;
+    inst->lfo_delay = 0;
+    inst->lfo_pmd = 0;
+    inst->lfo_amd = 0;
+    inst->lfo_wave = 0;
+    inst->lfo_sync = 1;
+    inst->lfo_pms = 3;
+    /* Pitch envelope - neutral */
+    inst->pitch_eg_r1 = 99;
+    inst->pitch_eg_r2 = 99;
+    inst->pitch_eg_r3 = 99;
+    inst->pitch_eg_r4 = 99;
+    inst->pitch_eg_l1 = 50;
+    inst->pitch_eg_l2 = 50;
+    inst->pitch_eg_l3 = 50;
+    inst->pitch_eg_l4 = 50;
+    /* Per-operator defaults */
+    for (int i = 0; i < 6; i++) {
+        inst->op_levels[i] = 0;
+        inst->op_coarse[i] = 1;
+        inst->op_fine[i] = 0;
+        inst->op_detune[i] = 7;  /* Center (displayed as 0) */
+        inst->op_eg_r1[i] = 99;
+        inst->op_eg_r2[i] = 99;
+        inst->op_eg_r3[i] = 99;
+        inst->op_eg_r4[i] = 99;
+        inst->op_eg_l1[i] = 99;
+        inst->op_eg_l2[i] = 99;
+        inst->op_eg_l3[i] = 99;
+        inst->op_eg_l4[i] = 0;
+        inst->op_vel_sens[i] = 0;
+        inst->op_amp_mod[i] = 0;
+        inst->op_osc_mode[i] = 0;  /* Ratio */
+        inst->op_rate_scale[i] = 0;
+        inst->op_key_bp[i] = 39;  /* C3 */
+        inst->op_key_ld[i] = 0;
+        inst->op_key_rd[i] = 0;
+        inst->op_key_lc[i] = 0;
+        inst->op_key_rc[i] = 0;
+    }
+
+    /* Initialize tuning */
+    inst->tuning = std::make_shared<TuningState>();
+
+    /* Initialize controllers */
+    inst->controllers.core = &inst->fm_core;
+    inst->controllers.masterTune = 0;
+    memset(inst->controllers.values_, 0, sizeof(inst->controllers.values_));
+    inst->controllers.values_[kControllerPitch] = 0x2000;  /* Center pitch bend */
+    inst->controllers.values_[kControllerPitchRangeUp] = 2;
+    inst->controllers.values_[kControllerPitchRangeDn] = 2;
+    inst->controllers.values_[kControllerPitchStep] = 0;
+    inst->controllers.modwheel_cc = 0;
+    inst->controllers.breath_cc = 0;
+    inst->controllers.foot_cc = 0;
+    inst->controllers.aftertouch_cc = 0;
+    inst->controllers.portamento_cc = 0;
+    inst->controllers.portamento_enable_cc = false;
+    inst->controllers.portamento_gliss_cc = false;
+    inst->controllers.mpeEnabled = false;
+
+    /* Configure modulation sources */
+    inst->controllers.wheel.range = 99;
+    inst->controllers.wheel.pitch = true;
+    inst->controllers.wheel.amp = true;
+    inst->controllers.wheel.eg = false;
+
+    inst->controllers.at.range = 99;
+    inst->controllers.at.pitch = true;
+    inst->controllers.at.amp = true;
+    inst->controllers.at.eg = false;
+
+    inst->controllers.breath.range = 99;
+    inst->controllers.breath.pitch = false;
+    inst->controllers.breath.amp = true;
+    inst->controllers.breath.eg = false;
+
+    inst->controllers.foot.range = 99;
+    inst->controllers.foot.pitch = false;
+    inst->controllers.foot.amp = false;
+    inst->controllers.foot.eg = false;
+
+    inst->controllers.refresh();
+
+    /* Initialize tables (global - safe to call multiple times) */
+    Exp2::init();
+    Sin::init();
+    Lfo::init(MOVE_SAMPLE_RATE);
+    Freqlut::init(MOVE_SAMPLE_RATE);
+    PitchEnv::init(MOVE_SAMPLE_RATE);
+    Env::init_sr(MOVE_SAMPLE_RATE);
+    Porta::init_sr(MOVE_SAMPLE_RATE);
+
+    /* Initialize voices */
+    for (int i = 0; i < MAX_VOICES; i++) {
+        inst->voices[i] = new Dx7Note(inst->tuning, nullptr);
+        inst->voice_note[i] = -1;
+        inst->voice_velocity[i] = 0;
+        inst->voice_age[i] = 0;
+        inst->voice_sustained[i] = false;
+    }
+
+    /* Initialize default patch */
+    v2_init_default_patch(inst);
+    memcpy(inst->patches[0], inst->current_patch, DX7_PATCH_SIZE);
+    strcpy(inst->patch_names[0], "Init");
+
+    /* Initialize LFO */
+    inst->lfo.reset(inst->current_patch + 137);
+
+    /* Initialize load error */
+    inst->load_error[0] = '\0';
+
+    /* Scan for .syx banks in banks/ directory */
+    scan_syx_banks(inst);
+
+    /* Load patches */
+    int syx_result = -1;
+    if (inst->syx_bank_count > 0) {
+        /* Banks found - load the first one */
+        inst->syx_bank_index = 0;
+        syx_result = v2_load_syx(inst, inst->syx_banks[0].path, inst->syx_banks[0].sub_index);
+        if (syx_result != 0) {
+            snprintf(inst->load_error, sizeof(inst->load_error),
+                     "Failed to load bank: %s", inst->syx_banks[0].name);
+        }
+    } else {
+        /* No banks found - try legacy patches.syx in module dir */
+        char default_syx[512];
+        snprintf(default_syx, sizeof(default_syx), "%s/patches.syx", module_dir);
+        syx_result = v2_load_syx(inst, default_syx, 0);  /* legacy fallback: always a plain single-bank file */
+        if (syx_result != 0) {
+            snprintf(inst->load_error, sizeof(inst->load_error),
+                     "No .syx banks found in banks/ folder");
+        }
+    }
+
+    /* Select first preset if we have patches */
+    if (inst->preset_count > 0) {
+        v2_select_preset(inst, 0);
+    }
+
+    /* Extract initial patch parameters */
+    extract_patch_params(inst);
+
+    plugin_log("Instance created");
+    return inst;
+}
+
+/* v2: Destroy instance */
+static void v2_destroy_instance(void *instance) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst) return;
+
+    /* Clean up voices */
+    for (int i = 0; i < MAX_VOICES; i++) {
+        if (inst->voices[i]) {
+            delete inst->voices[i];
+            inst->voices[i] = NULL;
+        }
+    }
+
+    plugin_log("Instance destroyed");
+    delete inst;
+}
+
+/* v2: MIDI handler */
+static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst || len < 1) return;
+    (void)source;
+
+    uint8_t status = msg[0] & 0xF0;
+    uint8_t data1 = (len > 1) ? msg[1] : 0;
+    uint8_t data2 = (len > 2) ? msg[2] : 0;
+
+    switch (status) {
+        case 0x90: /* Note On */
+            if (data2 > 0) {
+                /* Apply octave transpose and DX7 patch transpose (24 = no transpose) */
+                int note = data1 + (inst->octave_transpose * 12) + (inst->transpose - 24);
+                if (note < 0) note = 0;
+                if (note > 127) note = 127;
+
+                /* Count active voices before adding */
+                int active_before = 0;
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    if (inst->voice_note[i] >= 0) active_before++;
+                }
+
+                int voice = v2_allocate_voice(inst);
+                inst->voices[voice]->init(inst->current_patch, note, data2, 0, &inst->controllers);
+                inst->voice_note[voice] = note;
+                inst->voice_velocity[voice] = data2;
+                inst->voice_age[voice] = inst->age_counter++;
+                inst->voice_sustained[voice] = false;
+
+                /* Only trigger LFO sync on first voice */
+                if (active_before == 0) {
+                    inst->lfo.keydown();
+                }
+            } else {
+                /* Note off via velocity 0 */
+                int note = data1 + (inst->octave_transpose * 12) + (inst->transpose - 24);
+                if (note < 0) note = 0;
+                if (note > 127) note = 127;
+
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    if (inst->voice_note[i] == note) {
+                        if (inst->sustain_pedal) {
+                            inst->voice_sustained[i] = true;
+                        } else if (inst->voices[i]) {
+                            inst->voices[i]->keyup();
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 0x80: /* Note Off */
+            {
+                int note = data1 + (inst->octave_transpose * 12) + (inst->transpose - 24);
+                if (note < 0) note = 0;
+                if (note > 127) note = 127;
+
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    if (inst->voice_note[i] == note) {
+                        if (inst->sustain_pedal) {
+                            inst->voice_sustained[i] = true;
+                        } else if (inst->voices[i]) {
+                            inst->voices[i]->keyup();
+                        }
+                    }
+                }
+            }
+            break;
+
+        case 0xB0: /* Control Change */
+            if (data1 == 64) { /* Sustain pedal */
+                inst->sustain_pedal = (data2 >= 64);
+                if (!inst->sustain_pedal) {
+                    /* Release sustained notes */
+                    for (int i = 0; i < MAX_VOICES; i++) {
+                        if (inst->voice_sustained[i] && inst->voices[i]) {
+                            inst->voices[i]->keyup();
+                            inst->voice_sustained[i] = false;
+                        }
+                    }
+                }
+            } else if (data1 == 1) { /* Mod wheel */
+                inst->controllers.modwheel_cc = data2;
+                inst->controllers.refresh();  /* Update pitch_mod/amp_mod from new value */
+            } else if (data1 == 123) { /* All notes off */
+                for (int i = 0; i < MAX_VOICES; i++) {
+                    inst->voice_note[i] = -1;
+                    inst->voice_sustained[i] = false;
+                }
+                inst->active_voices = 0;
+            }
+            break;
+
+        case 0xD0: /* Channel aftertouch */
+            inst->controllers.aftertouch_cc = data1;  /* Aftertouch value is in data1 */
+            inst->controllers.refresh();  /* Update pitch_mod/amp_mod from new value */
+            break;
+
+        case 0xE0: /* Pitch bend */
+            {
+                int bend = ((data2 << 7) | data1);
+                inst->controllers.values_[kControllerPitch] = bend;
+            }
+            break;
+    }
+}
+
+/* Helper to extract a JSON number value by key */
+static int json_get_number(const char *json, const char *key, float *out) {
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return -1;
+    pos += strlen(search);
+    while (*pos == ' ') pos++;
+    *out = (float)atof(pos);
+    return 0;
+}
+
+/* Helper to extract a JSON string value by key */
+static int json_get_string(const char *json, const char *key, char *out, int out_len) {
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\":\"", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return -1;
+    pos += strlen(search);
+    const char *end = strchr(pos, '"');
+    if (!end) return -1;
+    int len = end - pos;
+    if (len >= out_len) len = out_len - 1;
+    strncpy(out, pos, len);
+    out[len] = '\0';
+    return len;
+}
+
+/* Find bank index by name, returns -1 if not found */
+static int find_bank_by_name(dx7_instance_t *inst, const char *name) {
+    for (int i = 0; i < inst->syx_bank_count; i++) {
+        if (strcmp(inst->syx_banks[i].name, name) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* v2: Set parameter */
+static void v2_set_param(void *instance, const char *key, const char *val) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst) return;
+
+    /* State restore from patch save */
+    if (strcmp(key, "state") == 0) {
+        float fval;
+
+        /* Restore bank first - try by name, fall back to index */
+        char bank_name[128];
+        int bank_idx = -1;
+        if (json_get_string(val, "syx_bank_name", bank_name, sizeof(bank_name)) > 0) {
+            bank_idx = find_bank_by_name(inst, bank_name);
+        }
+        if (bank_idx < 0 && json_get_number(val, "syx_bank_index", &fval) == 0) {
+            int idx = (int)fval;
+            if (idx >= 0 && idx < inst->syx_bank_count) {
+                bank_idx = idx;
+            }
+        }
+        if (bank_idx >= 0) {
+            set_syx_bank_index(inst, bank_idx);
+        }
+
+        /* Restore preset */
+        if (json_get_number(val, "preset", &fval) == 0) {
+            int idx = (int)fval;
+            if (idx >= 0 && idx < inst->preset_count) {
+                v2_select_preset(inst, idx);
+            }
+        }
+
+        /* Restore octave transpose */
+        if (json_get_number(val, "octave_transpose", &fval) == 0) {
+            inst->octave_transpose = (int)fval;
+            if (inst->octave_transpose < -3) inst->octave_transpose = -3;
+            if (inst->octave_transpose > 3) inst->octave_transpose = 3;
+        }
+
+        /* Restore output level */
+        if (json_get_number(val, "output_level", &fval) == 0) {
+            inst->output_level = (int)fval;
+            if (inst->output_level < 0) inst->output_level = 0;
+            if (inst->output_level > 100) inst->output_level = 100;
+        }
+
+        /* Restore DX7 global parameters */
+        if (json_get_number(val, "algorithm", &fval) == 0) {
+            inst->algorithm = (int)fval;
+            if (inst->algorithm < 0) inst->algorithm = 0;
+            if (inst->algorithm > 31) inst->algorithm = 31;
+        }
+        if (json_get_number(val, "feedback", &fval) == 0) {
+            inst->feedback = (int)fval;
+            if (inst->feedback < 0) inst->feedback = 0;
+            if (inst->feedback > 7) inst->feedback = 7;
+        }
+        if (json_get_number(val, "osc_sync", &fval) == 0) {
+            inst->osc_sync = (int)fval;
+            if (inst->osc_sync < 0) inst->osc_sync = 0;
+            if (inst->osc_sync > 1) inst->osc_sync = 1;
+        }
+        if (json_get_number(val, "transpose", &fval) == 0) {
+            inst->transpose = (int)fval;
+            if (inst->transpose < 0) inst->transpose = 0;
+            if (inst->transpose > 48) inst->transpose = 48;
+        }
+        /* LFO parameters */
+        if (json_get_number(val, "lfo_speed", &fval) == 0) {
+            inst->lfo_speed = (int)fval;
+            if (inst->lfo_speed < 0) inst->lfo_speed = 0;
+            if (inst->lfo_speed > 99) inst->lfo_speed = 99;
+        }
+        if (json_get_number(val, "lfo_delay", &fval) == 0) {
+            inst->lfo_delay = (int)fval;
+            if (inst->lfo_delay < 0) inst->lfo_delay = 0;
+            if (inst->lfo_delay > 99) inst->lfo_delay = 99;
+        }
+        if (json_get_number(val, "lfo_pmd", &fval) == 0) {
+            inst->lfo_pmd = (int)fval;
+            if (inst->lfo_pmd < 0) inst->lfo_pmd = 0;
+            if (inst->lfo_pmd > 99) inst->lfo_pmd = 99;
+        }
+        if (json_get_number(val, "lfo_amd", &fval) == 0) {
+            inst->lfo_amd = (int)fval;
+            if (inst->lfo_amd < 0) inst->lfo_amd = 0;
+            if (inst->lfo_amd > 99) inst->lfo_amd = 99;
+        }
+        if (json_get_number(val, "lfo_wave", &fval) == 0) {
+            inst->lfo_wave = (int)fval;
+            if (inst->lfo_wave < 0) inst->lfo_wave = 0;
+            if (inst->lfo_wave > 5) inst->lfo_wave = 5;
+        }
+        if (json_get_number(val, "lfo_sync", &fval) == 0) {
+            inst->lfo_sync = (int)fval;
+            if (inst->lfo_sync < 0) inst->lfo_sync = 0;
+            if (inst->lfo_sync > 1) inst->lfo_sync = 1;
+        }
+        if (json_get_number(val, "lfo_pms", &fval) == 0) {
+            inst->lfo_pms = (int)fval;
+            if (inst->lfo_pms < 0) inst->lfo_pms = 0;
+            if (inst->lfo_pms > 7) inst->lfo_pms = 7;
+        }
+        /* Pitch envelope */
+        if (json_get_number(val, "pitch_eg_r1", &fval) == 0) {
+            inst->pitch_eg_r1 = (int)fval;
+            if (inst->pitch_eg_r1 < 0) inst->pitch_eg_r1 = 0;
+            if (inst->pitch_eg_r1 > 99) inst->pitch_eg_r1 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_r2", &fval) == 0) {
+            inst->pitch_eg_r2 = (int)fval;
+            if (inst->pitch_eg_r2 < 0) inst->pitch_eg_r2 = 0;
+            if (inst->pitch_eg_r2 > 99) inst->pitch_eg_r2 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_r3", &fval) == 0) {
+            inst->pitch_eg_r3 = (int)fval;
+            if (inst->pitch_eg_r3 < 0) inst->pitch_eg_r3 = 0;
+            if (inst->pitch_eg_r3 > 99) inst->pitch_eg_r3 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_r4", &fval) == 0) {
+            inst->pitch_eg_r4 = (int)fval;
+            if (inst->pitch_eg_r4 < 0) inst->pitch_eg_r4 = 0;
+            if (inst->pitch_eg_r4 > 99) inst->pitch_eg_r4 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_l1", &fval) == 0) {
+            inst->pitch_eg_l1 = (int)fval;
+            if (inst->pitch_eg_l1 < 0) inst->pitch_eg_l1 = 0;
+            if (inst->pitch_eg_l1 > 99) inst->pitch_eg_l1 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_l2", &fval) == 0) {
+            inst->pitch_eg_l2 = (int)fval;
+            if (inst->pitch_eg_l2 < 0) inst->pitch_eg_l2 = 0;
+            if (inst->pitch_eg_l2 > 99) inst->pitch_eg_l2 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_l3", &fval) == 0) {
+            inst->pitch_eg_l3 = (int)fval;
+            if (inst->pitch_eg_l3 < 0) inst->pitch_eg_l3 = 0;
+            if (inst->pitch_eg_l3 > 99) inst->pitch_eg_l3 = 99;
+        }
+        if (json_get_number(val, "pitch_eg_l4", &fval) == 0) {
+            inst->pitch_eg_l4 = (int)fval;
+            if (inst->pitch_eg_l4 < 0) inst->pitch_eg_l4 = 0;
+            if (inst->pitch_eg_l4 > 99) inst->pitch_eg_l4 = 99;
+        }
+
+        /* Restore per-operator params */
+        for (int op = 0; op < 6; op++) {
+            char key_buf[32];
+            snprintf(key_buf, sizeof(key_buf), "op%d_level", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_levels[op] = (int)fval;
+                if (inst->op_levels[op] < 0) inst->op_levels[op] = 0;
+                if (inst->op_levels[op] > 99) inst->op_levels[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_coarse", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_coarse[op] = (int)fval;
+                if (inst->op_coarse[op] < 0) inst->op_coarse[op] = 0;
+                if (inst->op_coarse[op] > 31) inst->op_coarse[op] = 31;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_fine", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_fine[op] = (int)fval;
+                if (inst->op_fine[op] < 0) inst->op_fine[op] = 0;
+                if (inst->op_fine[op] > 99) inst->op_fine[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_detune", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_detune[op] = (int)fval;
+                if (inst->op_detune[op] < 0) inst->op_detune[op] = 0;
+                if (inst->op_detune[op] > 14) inst->op_detune[op] = 14;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_osc_mode", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_osc_mode[op] = (int)fval;
+                if (inst->op_osc_mode[op] < 0) inst->op_osc_mode[op] = 0;
+                if (inst->op_osc_mode[op] > 1) inst->op_osc_mode[op] = 1;
+            }
+            /* EG Rates */
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_r1", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_r1[op] = (int)fval;
+                if (inst->op_eg_r1[op] < 0) inst->op_eg_r1[op] = 0;
+                if (inst->op_eg_r1[op] > 99) inst->op_eg_r1[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_r2", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_r2[op] = (int)fval;
+                if (inst->op_eg_r2[op] < 0) inst->op_eg_r2[op] = 0;
+                if (inst->op_eg_r2[op] > 99) inst->op_eg_r2[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_r3", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_r3[op] = (int)fval;
+                if (inst->op_eg_r3[op] < 0) inst->op_eg_r3[op] = 0;
+                if (inst->op_eg_r3[op] > 99) inst->op_eg_r3[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_r4", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_r4[op] = (int)fval;
+                if (inst->op_eg_r4[op] < 0) inst->op_eg_r4[op] = 0;
+                if (inst->op_eg_r4[op] > 99) inst->op_eg_r4[op] = 99;
+            }
+            /* EG Levels */
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_l1", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_l1[op] = (int)fval;
+                if (inst->op_eg_l1[op] < 0) inst->op_eg_l1[op] = 0;
+                if (inst->op_eg_l1[op] > 99) inst->op_eg_l1[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_l2", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_l2[op] = (int)fval;
+                if (inst->op_eg_l2[op] < 0) inst->op_eg_l2[op] = 0;
+                if (inst->op_eg_l2[op] > 99) inst->op_eg_l2[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_l3", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_l3[op] = (int)fval;
+                if (inst->op_eg_l3[op] < 0) inst->op_eg_l3[op] = 0;
+                if (inst->op_eg_l3[op] > 99) inst->op_eg_l3[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_eg_l4", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_eg_l4[op] = (int)fval;
+                if (inst->op_eg_l4[op] < 0) inst->op_eg_l4[op] = 0;
+                if (inst->op_eg_l4[op] > 99) inst->op_eg_l4[op] = 99;
+            }
+            /* Other operator params */
+            snprintf(key_buf, sizeof(key_buf), "op%d_vel_sens", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_vel_sens[op] = (int)fval;
+                if (inst->op_vel_sens[op] < 0) inst->op_vel_sens[op] = 0;
+                if (inst->op_vel_sens[op] > 7) inst->op_vel_sens[op] = 7;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_amp_mod", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_amp_mod[op] = (int)fval;
+                if (inst->op_amp_mod[op] < 0) inst->op_amp_mod[op] = 0;
+                if (inst->op_amp_mod[op] > 3) inst->op_amp_mod[op] = 3;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_rate_scale", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_rate_scale[op] = (int)fval;
+                if (inst->op_rate_scale[op] < 0) inst->op_rate_scale[op] = 0;
+                if (inst->op_rate_scale[op] > 7) inst->op_rate_scale[op] = 7;
+            }
+            /* Keyboard scaling */
+            snprintf(key_buf, sizeof(key_buf), "op%d_key_bp", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_key_bp[op] = (int)fval;
+                if (inst->op_key_bp[op] < 0) inst->op_key_bp[op] = 0;
+                if (inst->op_key_bp[op] > 99) inst->op_key_bp[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_key_ld", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_key_ld[op] = (int)fval;
+                if (inst->op_key_ld[op] < 0) inst->op_key_ld[op] = 0;
+                if (inst->op_key_ld[op] > 99) inst->op_key_ld[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_key_rd", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_key_rd[op] = (int)fval;
+                if (inst->op_key_rd[op] < 0) inst->op_key_rd[op] = 0;
+                if (inst->op_key_rd[op] > 99) inst->op_key_rd[op] = 99;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_key_lc", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_key_lc[op] = (int)fval;
+                if (inst->op_key_lc[op] < 0) inst->op_key_lc[op] = 0;
+                if (inst->op_key_lc[op] > 3) inst->op_key_lc[op] = 3;
+            }
+            snprintf(key_buf, sizeof(key_buf), "op%d_key_rc", op + 1);
+            if (json_get_number(val, key_buf, &fval) == 0) {
+                inst->op_key_rc[op] = (int)fval;
+                if (inst->op_key_rc[op] < 0) inst->op_key_rc[op] = 0;
+                if (inst->op_key_rc[op] > 3) inst->op_key_rc[op] = 3;
+            }
+        }
+
+        /* Apply all restored params to patch */
+        apply_patch_params(inst);
+        return;
+    }
+
+    if (strcmp(key, "syx_path") == 0) {
+        v2_load_syx(inst, val, 0);  /* direct path load (syx_path key): always bank 0 of that file */
+        if (inst->preset_count > 0) {
+            v2_select_preset(inst, 0);
+        }
+    } else if (strcmp(key, "preset") == 0) {
+        int idx = atoi(val);
+        if (idx != inst->current_preset) v2_select_preset(inst, idx);
+    } else if (strcmp(key, "octave_transpose") == 0) {
+        int v = atoi(val);
+        if (v < -3) v = -3;
+        if (v > 3) v = 3;
+        if (v != inst->octave_transpose) {
+            /* Release all notes to prevent hanging when transpose changes */
+            for (int i = 0; i < MAX_VOICES; i++) {
+                if (inst->voice_note[i] >= 0 && inst->voices[i]) {
+                    inst->voices[i]->keyup();
+                }
+            }
+        }
+        inst->octave_transpose = v;
+    } else if (strcmp(key, "output_level") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
+        inst->output_level = v;
+    } else if (strcmp(key, "panic") == 0 || strcmp(key, "all_notes_off") == 0) {
+        /* Silence all voices */
+        for (int i = 0; i < MAX_VOICES; i++) {
+            if (inst->voices[i]) {
+                delete inst->voices[i];
+                inst->voices[i] = new Dx7Note(inst->tuning, nullptr);
+            }
+            inst->voice_note[i] = -1;
+            inst->voice_sustained[i] = false;
+            inst->voice_age[i] = 0;
+        }
+        inst->sustain_pedal = false;
+        inst->active_voices = 0;
+    }
+    /* Bank switching */
+    else if (strcmp(key, "syx_bank_index") == 0) {
+        set_syx_bank_index(inst, atoi(val));
+    }
+    else if (strcmp(key, "next_syx_bank") == 0) {
+        set_syx_bank_index(inst, inst->syx_bank_index + 1);
+    }
+    else if (strcmp(key, "prev_syx_bank") == 0) {
+        set_syx_bank_index(inst, inst->syx_bank_index - 1);
+    }
+    /* DX7 parameters (editable) */
+    else if (strcmp(key, "algorithm") == 0) {
+        int v = atoi(val) - 1;  /* Input is 1-32, store as 0-31 */
+        if (v < 0) v = 0;
+        if (v > 31) v = 31;
+        inst->algorithm = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "feedback") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 7) v = 7;
+        inst->feedback = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_speed") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->lfo_speed = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_delay") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->lfo_delay = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_pmd") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->lfo_pmd = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_amd") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->lfo_amd = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_wave") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 5) v = 5;
+        inst->lfo_wave = v;
+        apply_patch_params(inst);
+    }
+    /* Per-operator parameters: op1_level, op1_coarse, op1_fine, op1_detune, op1_eg_r1, etc. */
+    else if (strncmp(key, "op", 2) == 0 && key[2] >= '1' && key[2] <= '6' && key[3] == '_') {
+        int op = key[2] - '1';  /* Convert '1'-'6' to 0-5 */
+        const char *param = key + 4;  /* Skip "opN_" */
+        int v = atoi(val);
+
+        if (strcmp(param, "level") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_levels[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "coarse") == 0) {
+            if (v < 0) v = 0;
+            if (v > 31) v = 31;
+            inst->op_coarse[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "fine") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_fine[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "detune") == 0) {
+            /* Input is -7 to +7, store as 0-14 */
+            v = v + 7;
+            if (v < 0) v = 0;
+            if (v > 14) v = 14;
+            inst->op_detune[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_r1") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_r1[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_r2") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_r2[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_r3") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_r3[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_r4") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_r4[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "vel_sens") == 0) {
+            if (v < 0) v = 0;
+            if (v > 7) v = 7;
+            inst->op_vel_sens[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_l1") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_l1[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_l2") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_l2[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_l3") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_l3[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "eg_l4") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_eg_l4[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "amp_mod") == 0) {
+            if (v < 0) v = 0;
+            if (v > 3) v = 3;
+            inst->op_amp_mod[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "osc_mode") == 0) {
+            if (v < 0) v = 0;
+            if (v > 1) v = 1;
+            inst->op_osc_mode[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "rate_scale") == 0) {
+            if (v < 0) v = 0;
+            if (v > 7) v = 7;
+            inst->op_rate_scale[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "key_bp") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_key_bp[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "key_ld") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_key_ld[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "key_rd") == 0) {
+            if (v < 0) v = 0;
+            if (v > 99) v = 99;
+            inst->op_key_rd[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "key_lc") == 0) {
+            if (v < 0) v = 0;
+            if (v > 3) v = 3;
+            inst->op_key_lc[op] = v;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "key_rc") == 0) {
+            if (v < 0) v = 0;
+            if (v > 3) v = 3;
+            inst->op_key_rc[op] = v;
+            apply_patch_params(inst);
+        }
+    }
+    /* Global DX7 parameters (non-operator) */
+    else if (strcmp(key, "osc_sync") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        inst->osc_sync = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_sync") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 1) v = 1;
+        inst->lfo_sync = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "lfo_pms") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 7) v = 7;
+        inst->lfo_pms = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "transpose") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 48) v = 48;
+        if (v != inst->transpose) {
+            /* Release all notes to prevent hanging when transpose changes */
+            for (int i = 0; i < MAX_VOICES; i++) {
+                if (inst->voice_note[i] >= 0 && inst->voices[i]) {
+                    inst->voices[i]->keyup();
+                }
+            }
+        }
+        inst->transpose = v;
+        apply_patch_params(inst);
+    }
+    /* Pitch envelope parameters */
+    else if (strcmp(key, "pitch_eg_r1") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_r1 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_r2") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_r2 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_r3") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_r3 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_r4") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_r4 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_l1") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_l1 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_l2") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_l2 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_l3") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_l3 = v;
+        apply_patch_params(inst);
+    }
+    else if (strcmp(key, "pitch_eg_l4") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > 99) v = 99;
+        inst->pitch_eg_l4 = v;
+        apply_patch_params(inst);
+    }
+}
+
+/* v2: Get parameter */
+static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst) return -1;
+
+    if (strcmp(key, "load_error") == 0) {
+        if (inst->load_error[0]) {
+            return snprintf(buf, buf_len, "%s", inst->load_error);
+        }
+        return 0;  /* No error */
+    }
+    if (strcmp(key, "preset_name") == 0 || strcmp(key, "patch_name") == 0 || strcmp(key, "name") == 0) {
+        return snprintf(buf, buf_len, "%s", inst->patch_name);
+    }
+    if (strcmp(key, "preset_count") == 0 || strcmp(key, "total_patches") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->preset_count);
+    }
+    if (strcmp(key, "current_preset") == 0 || strcmp(key, "preset") == 0 || strcmp(key, "current_patch") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->current_preset);
+    }
+    if (strcmp(key, "octave_transpose") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->octave_transpose);
+    }
+    if (strcmp(key, "active_voices") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->active_voices);
+    }
+    if (strcmp(key, "polyphony") == 0) {
+        return snprintf(buf, buf_len, "%d", MAX_VOICES);
+    }
+    /* Unified bank/preset parameters for Chain compatibility */
+    if (strcmp(key, "bank_name") == 0) {
+        /* The scanned list entry's own display name -- already extension-stripped and,
+         * for a multi-bank "ROM" file, suffixed "[k/n]" so each logical bank reads
+         * distinctly (see scan_syx_banks()). Falls back to deriving from patch_path only
+         * when no bank list exists at all (e.g. the legacy single patches.syx path, which
+         * never populates syx_banks[]). */
+        if (inst->syx_bank_count > 0 && inst->syx_bank_index >= 0 && inst->syx_bank_index < inst->syx_bank_count) {
+            const char *n = inst->syx_banks[inst->syx_bank_index].name;
+            return snprintf(buf, buf_len, "%s", n[0] ? n : "Dexed");
+        }
+        const char *basename = strrchr(inst->patch_path, '/');
+        if (basename) {
+            basename++;  /* Skip the '/' */
+        } else {
+            basename = inst->patch_path;
+        }
+        /* Remove .syx extension if present */
+        char name[128];
+        strncpy(name, basename, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+        char *ext = strrchr(name, '.');
+        if (ext && (strcmp(ext, ".syx") == 0 || strcmp(ext, ".SYX") == 0)) {
+            *ext = '\0';
+        }
+        return snprintf(buf, buf_len, "%s", name[0] ? name : "Dexed");
+    }
+    if (strcmp(key, "patch_in_bank") == 0) {
+        /* 1-indexed position within the 32-patch syx bank */
+        return snprintf(buf, buf_len, "%d", inst->current_preset + 1);
+    }
+    if (strcmp(key, "bank_count") == 0) {
+        /* Return number of .syx banks found */
+        return snprintf(buf, buf_len, "%d", inst->syx_bank_count > 0 ? inst->syx_bank_count : 1);
+    }
+    /* Bank list for Shadow UI menu */
+    if (strcmp(key, "syx_bank_list") == 0) {
+        scan_syx_banks(inst);  /* Rescan each time to pick up new banks */
+        int written = snprintf(buf, buf_len, "[");
+        for (int i = 0; i < inst->syx_bank_count && written < buf_len - 50; i++) {
+            if (i > 0) written += snprintf(buf + written, buf_len - written, ",");
+            written += snprintf(buf + written, buf_len - written,
+                "{\"label\":\"%s\",\"index\":%d}", inst->syx_banks[i].name, i);
+        }
+        written += snprintf(buf + written, buf_len - written, "]");
+        return written;
+    }
+    if (strcmp(key, "syx_bank_index") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->syx_bank_index);
+    }
+    if (strcmp(key, "syx_bank_count") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->syx_bank_count);
+    }
+    if (strcmp(key, "syx_bank_name") == 0) {
+        if (inst->syx_bank_count > 0 && inst->syx_bank_index < inst->syx_bank_count) {
+            return snprintf(buf, buf_len, "%s", inst->syx_banks[inst->syx_bank_index].name);
+        }
+        return snprintf(buf, buf_len, "No banks");
+    }
+    /* DX7 parameters */
+    if (strcmp(key, "algorithm") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->algorithm + 1);  /* Display as 1-32 */
+    }
+    if (strcmp(key, "feedback") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->feedback);
+    }
+    if (strcmp(key, "lfo_speed") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_speed);
+    }
+    if (strcmp(key, "lfo_delay") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_delay);
+    }
+    if (strcmp(key, "lfo_pmd") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_pmd);
+    }
+    if (strcmp(key, "lfo_amd") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_amd);
+    }
+    if (strcmp(key, "lfo_wave") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_wave);
+    }
+    /* Per-operator parameters */
+    if (strncmp(key, "op", 2) == 0 && key[2] >= '1' && key[2] <= '6' && key[3] == '_') {
+        int op = key[2] - '1';  /* Convert '1'-'6' to 0-5 */
+        const char *param = key + 4;  /* Skip "opN_" */
+
+        if (strcmp(param, "level") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_levels[op]);
+        }
+        else if (strcmp(param, "coarse") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_coarse[op]);
+        }
+        else if (strcmp(param, "fine") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_fine[op]);
+        }
+        else if (strcmp(param, "detune") == 0) {
+            /* Display as -7 to +7 */
+            return snprintf(buf, buf_len, "%d", inst->op_detune[op] - 7);
+        }
+        else if (strcmp(param, "eg_r1") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_r1[op]);
+        }
+        else if (strcmp(param, "eg_r2") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_r2[op]);
+        }
+        else if (strcmp(param, "eg_r3") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_r3[op]);
+        }
+        else if (strcmp(param, "eg_r4") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_r4[op]);
+        }
+        else if (strcmp(param, "vel_sens") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_vel_sens[op]);
+        }
+        else if (strcmp(param, "eg_l1") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_l1[op]);
+        }
+        else if (strcmp(param, "eg_l2") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_l2[op]);
+        }
+        else if (strcmp(param, "eg_l3") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_l3[op]);
+        }
+        else if (strcmp(param, "eg_l4") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_eg_l4[op]);
+        }
+        else if (strcmp(param, "amp_mod") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_amp_mod[op]);
+        }
+        else if (strcmp(param, "osc_mode") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_osc_mode[op]);
+        }
+        else if (strcmp(param, "rate_scale") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_rate_scale[op]);
+        }
+        else if (strcmp(param, "key_bp") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_key_bp[op]);
+        }
+        else if (strcmp(param, "key_ld") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_key_ld[op]);
+        }
+        else if (strcmp(param, "key_rd") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_key_rd[op]);
+        }
+        else if (strcmp(param, "key_lc") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_key_lc[op]);
+        }
+        else if (strcmp(param, "key_rc") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_key_rc[op]);
+        }
+    }
+    /* Global DX7 parameters (non-operator) */
+    if (strcmp(key, "osc_sync") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->osc_sync);
+    }
+    if (strcmp(key, "lfo_sync") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_sync);
+    }
+    if (strcmp(key, "lfo_pms") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->lfo_pms);
+    }
+    if (strcmp(key, "transpose") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->transpose);
+    }
+    /* Pitch envelope parameters */
+    if (strcmp(key, "pitch_eg_r1") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_r1);
+    }
+    if (strcmp(key, "pitch_eg_r2") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_r2);
+    }
+    if (strcmp(key, "pitch_eg_r3") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_r3);
+    }
+    if (strcmp(key, "pitch_eg_r4") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_r4);
+    }
+    if (strcmp(key, "pitch_eg_l1") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_l1);
+    }
+    if (strcmp(key, "pitch_eg_l2") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_l2);
+    }
+    if (strcmp(key, "pitch_eg_l3") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_l3);
+    }
+    if (strcmp(key, "pitch_eg_l4") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->pitch_eg_l4);
+    }
+    /* UI hierarchy for shadow parameter editor */
+    if (strcmp(key, "ui_hierarchy") == 0) {
+        const char *hierarchy = "{"
+            "\"modes\":null,"
+            "\"levels\":{"
+                "\"root\":{"
+                    "\"list_param\":\"preset\","
+                    "\"count_param\":\"preset_count\","
+                    "\"name_param\":\"preset_name\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"output_level\",\"octave_transpose\",\"feedback\",\"lfo_speed\",\"lfo_pmd\",\"lfo_amd\"],"
+                    "\"params\":["
+                        "{\"level\":\"global\",\"label\":\"Global\"},"
+                        "{\"level\":\"lfo\",\"label\":\"LFO\"},"
+                        "{\"level\":\"pitch_eg\",\"label\":\"Pitch EG\"},"
+                        "{\"level\":\"operators\",\"label\":\"Operators\"},"
+                        "{\"level\":\"banks\",\"label\":\"Choose Bank\"}"
+                    "]"
+                "},"
+                "\"global\":{"
+                    "\"label\":\"Global\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"output_level\",\"octave_transpose\",\"algorithm\",\"feedback\"],"
+                    "\"params\":["
+                        "{\"key\":\"output_level\",\"label\":\"Output Level\"},"
+                        "{\"key\":\"octave_transpose\",\"label\":\"Octave\"},"
+                        "{\"key\":\"algorithm\",\"label\":\"Algorithm\"},"
+                        "{\"key\":\"feedback\",\"label\":\"Feedback\"},"
+                        "{\"key\":\"osc_sync\",\"label\":\"Osc Sync\"},"
+                        "{\"key\":\"transpose\",\"label\":\"Transpose\"}"
+                    "]"
+                "},"
+                "\"lfo\":{"
+                    "\"label\":\"LFO\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"lfo_speed\",\"lfo_delay\",\"lfo_pmd\",\"lfo_amd\",\"lfo_pms\",\"lfo_wave\"],"
+                    "\"params\":["
+                        "{\"key\":\"lfo_speed\",\"label\":\"Speed\"},"
+                        "{\"key\":\"lfo_delay\",\"label\":\"Delay\"},"
+                        "{\"key\":\"lfo_pmd\",\"label\":\"Pitch Mod\"},"
+                        "{\"key\":\"lfo_amd\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"lfo_pms\",\"label\":\"Pitch Sens\"},"
+                        "{\"key\":\"lfo_wave\",\"label\":\"Waveform\"},"
+                        "{\"key\":\"lfo_sync\",\"label\":\"Key Sync\"}"
+                    "]"
+                "},"
+                "\"pitch_eg\":{"
+                    "\"label\":\"Pitch EG\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"pitch_eg_r1\",\"pitch_eg_r2\",\"pitch_eg_r3\",\"pitch_eg_r4\",\"pitch_eg_l1\",\"pitch_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"pitch_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"pitch_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"pitch_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"pitch_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"pitch_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"pitch_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"pitch_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"pitch_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"operators\":{"
+                    "\"label\":\"Operators\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op1_level\",\"op2_level\",\"op3_level\",\"op4_level\",\"op5_level\",\"op6_level\"],"
+                    "\"params\":["
+                        "{\"level\":\"op1\",\"label\":\"Operator 1\"},"
+                        "{\"level\":\"op2\",\"label\":\"Operator 2\"},"
+                        "{\"level\":\"op3\",\"label\":\"Operator 3\"},"
+                        "{\"level\":\"op4\",\"label\":\"Operator 4\"},"
+                        "{\"level\":\"op5\",\"label\":\"Operator 5\"},"
+                        "{\"level\":\"op6\",\"label\":\"Operator 6\"}"
+                    "]"
+                "},"
+                "\"op1\":{"
+                    "\"label\":\"Operator 1\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op1_level\",\"op1_coarse\",\"op1_fine\",\"op1_detune\",\"op1_eg_r1\",\"op1_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op1_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op1_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op1_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op1_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op1_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op1_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op1_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op1_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op1_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op1_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op1_eg\":{"
+                    "\"label\":\"Op1 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op1_eg_r1\",\"op1_eg_r2\",\"op1_eg_r3\",\"op1_eg_r4\",\"op1_eg_l1\",\"op1_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op1_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op1_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op1_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op1_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op1_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op1_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op1_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op1_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op1_kbd\":{"
+                    "\"label\":\"Op1 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op1_key_bp\",\"op1_key_ld\",\"op1_key_rd\",\"op1_key_lc\",\"op1_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op1_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op1_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op1_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op1_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op1_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"op2\":{"
+                    "\"label\":\"Operator 2\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op2_level\",\"op2_coarse\",\"op2_fine\",\"op2_detune\",\"op2_eg_r1\",\"op2_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op2_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op2_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op2_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op2_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op2_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op2_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op2_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op2_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op2_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op2_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op2_eg\":{"
+                    "\"label\":\"Op2 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op2_eg_r1\",\"op2_eg_r2\",\"op2_eg_r3\",\"op2_eg_r4\",\"op2_eg_l1\",\"op2_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op2_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op2_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op2_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op2_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op2_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op2_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op2_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op2_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op2_kbd\":{"
+                    "\"label\":\"Op2 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op2_key_bp\",\"op2_key_ld\",\"op2_key_rd\",\"op2_key_lc\",\"op2_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op2_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op2_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op2_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op2_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op2_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"op3\":{"
+                    "\"label\":\"Operator 3\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op3_level\",\"op3_coarse\",\"op3_fine\",\"op3_detune\",\"op3_eg_r1\",\"op3_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op3_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op3_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op3_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op3_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op3_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op3_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op3_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op3_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op3_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op3_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op3_eg\":{"
+                    "\"label\":\"Op3 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op3_eg_r1\",\"op3_eg_r2\",\"op3_eg_r3\",\"op3_eg_r4\",\"op3_eg_l1\",\"op3_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op3_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op3_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op3_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op3_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op3_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op3_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op3_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op3_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op3_kbd\":{"
+                    "\"label\":\"Op3 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op3_key_bp\",\"op3_key_ld\",\"op3_key_rd\",\"op3_key_lc\",\"op3_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op3_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op3_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op3_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op3_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op3_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"op4\":{"
+                    "\"label\":\"Operator 4\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op4_level\",\"op4_coarse\",\"op4_fine\",\"op4_detune\",\"op4_eg_r1\",\"op4_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op4_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op4_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op4_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op4_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op4_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op4_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op4_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op4_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op4_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op4_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op4_eg\":{"
+                    "\"label\":\"Op4 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op4_eg_r1\",\"op4_eg_r2\",\"op4_eg_r3\",\"op4_eg_r4\",\"op4_eg_l1\",\"op4_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op4_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op4_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op4_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op4_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op4_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op4_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op4_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op4_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op4_kbd\":{"
+                    "\"label\":\"Op4 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op4_key_bp\",\"op4_key_ld\",\"op4_key_rd\",\"op4_key_lc\",\"op4_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op4_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op4_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op4_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op4_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op4_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"op5\":{"
+                    "\"label\":\"Operator 5\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op5_level\",\"op5_coarse\",\"op5_fine\",\"op5_detune\",\"op5_eg_r1\",\"op5_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op5_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op5_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op5_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op5_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op5_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op5_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op5_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op5_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op5_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op5_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op5_eg\":{"
+                    "\"label\":\"Op5 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op5_eg_r1\",\"op5_eg_r2\",\"op5_eg_r3\",\"op5_eg_r4\",\"op5_eg_l1\",\"op5_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op5_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op5_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op5_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op5_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op5_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op5_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op5_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op5_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op5_kbd\":{"
+                    "\"label\":\"Op5 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op5_key_bp\",\"op5_key_ld\",\"op5_key_rd\",\"op5_key_lc\",\"op5_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op5_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op5_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op5_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op5_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op5_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"op6\":{"
+                    "\"label\":\"Operator 6\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op6_level\",\"op6_coarse\",\"op6_fine\",\"op6_detune\",\"op6_eg_r1\",\"op6_eg_r4\"],"
+                    "\"params\":["
+                        "{\"key\":\"op6_level\",\"label\":\"Level\"},"
+                        "{\"key\":\"op6_coarse\",\"short_name\":\"Crs\",\"label\":\"Coarse\"},"
+                        "{\"key\":\"op6_fine\",\"label\":\"Fine\"},"
+                        "{\"key\":\"op6_detune\",\"short_name\":\"Det\",\"label\":\"Detune\"},"
+                        "{\"key\":\"op6_osc_mode\",\"short_name\":\"Mode\",\"label\":\"Osc Mode\"},"
+                        "{\"level\":\"op6_eg\",\"label\":\"Envelope\"},"
+                        "{\"level\":\"op6_kbd\",\"label\":\"Kbd Scaling\"},"
+                        "{\"key\":\"op6_vel_sens\",\"short_name\":\"Vel\",\"label\":\"Vel Sens\"},"
+                        "{\"key\":\"op6_amp_mod\",\"short_name\":\"AMS\",\"label\":\"Amp Mod\"},"
+                        "{\"key\":\"op6_rate_scale\",\"label\":\"Rate Scale\"}"
+                    "]"
+                "},"
+                "\"op6_eg\":{"
+                    "\"label\":\"Op6 Envelope\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op6_eg_r1\",\"op6_eg_r2\",\"op6_eg_r3\",\"op6_eg_r4\",\"op6_eg_l1\",\"op6_eg_l2\"],"
+                    "\"params\":["
+                        "{\"key\":\"op6_eg_r1\",\"label\":\"Rate 1\"},"
+                        "{\"key\":\"op6_eg_r2\",\"label\":\"Rate 2\"},"
+                        "{\"key\":\"op6_eg_r3\",\"label\":\"Rate 3\"},"
+                        "{\"key\":\"op6_eg_r4\",\"label\":\"Rate 4\"},"
+                        "{\"key\":\"op6_eg_l1\",\"label\":\"Level 1\"},"
+                        "{\"key\":\"op6_eg_l2\",\"label\":\"Level 2\"},"
+                        "{\"key\":\"op6_eg_l3\",\"label\":\"Level 3\"},"
+                        "{\"key\":\"op6_eg_l4\",\"label\":\"Level 4\"}"
+                    "]"
+                "},"
+                "\"op6_kbd\":{"
+                    "\"label\":\"Op6 Kbd Scale\","
+                    "\"children\":null,"
+                    "\"knobs\":[\"op6_key_bp\",\"op6_key_ld\",\"op6_key_rd\",\"op6_key_lc\",\"op6_key_rc\"],"
+                    "\"params\":["
+                        "{\"key\":\"op6_key_bp\",\"label\":\"Break Point\"},"
+                        "{\"key\":\"op6_key_ld\",\"label\":\"Left Depth\"},"
+                        "{\"key\":\"op6_key_rd\",\"label\":\"Right Depth\"},"
+                        "{\"key\":\"op6_key_lc\",\"label\":\"Left Curve\"},"
+                        "{\"key\":\"op6_key_rc\",\"label\":\"Right Curve\"}"
+                    "]"
+                "},"
+                "\"banks\":{"
+                    "\"label\":\"SYX Banks\","
+                    "\"items_param\":\"syx_bank_list\","
+                    "\"select_param\":\"syx_bank_index\","
+                    "\"children\":null,"
+                    "\"knobs\":[],"
+                    "\"params\":[]"
+                "}"
+            "}"
+        "}";
+        int len = strlen(hierarchy);
+        if (len < buf_len) {
+            strcpy(buf, hierarchy);
+            return len;
+        }
+        return -1;
+    }
+    /* Output level for get_param */
+    if (strcmp(key, "output_level") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->output_level);
+    }
+    /* Octave transpose for get_param */
+    if (strcmp(key, "octave_transpose") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->octave_transpose);
+    }
+    /* Chain params metadata for shadow UI - complete list of all editable parameters */
+    if (strcmp(key, "chain_params") == 0) {
+        /* Build chain_params JSON dynamically to include all parameters */
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w, "[");
+
+        /* Basic params */
+        w += snprintf(buf + w, buf_len - w,
+            "{\"key\":\"preset\",\"name\":\"Preset\",\"type\":\"int\",\"min\":0,\"max\":31},"
+            "{\"key\":\"output_level\",\"name\":\"Output\",\"type\":\"int\",\"min\":0,\"max\":100},"
+            "{\"key\":\"octave_transpose\",\"name\":\"Octave\",\"type\":\"int\",\"min\":-3,\"max\":3},");
+
+        /* Global params - using int for osc_sync since bool handling is uncertain */
+        w += snprintf(buf + w, buf_len - w,
+            "{\"key\":\"algorithm\",\"name\":\"Algorithm\",\"type\":\"int\",\"min\":1,\"max\":32},"
+            "{\"key\":\"feedback\",\"name\":\"Feedback\",\"type\":\"int\",\"min\":0,\"max\":7},"
+            "{\"key\":\"osc_sync\",\"name\":\"Osc Sync\",\"type\":\"int\",\"min\":0,\"max\":1},"
+            "{\"key\":\"transpose\",\"name\":\"Transpose\",\"type\":\"int\",\"min\":0,\"max\":48},");
+
+        /* LFO params - using int for lfo_wave since get_param returns integers */
+        w += snprintf(buf + w, buf_len - w,
+            "{\"key\":\"lfo_speed\",\"name\":\"LFO Spd\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"lfo_delay\",\"name\":\"LFO Dly\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"lfo_pmd\",\"name\":\"LFO PMD\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"lfo_amd\",\"name\":\"LFO AMD\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"lfo_pms\",\"name\":\"LFO PMS\",\"type\":\"int\",\"min\":0,\"max\":7},"
+            "{\"key\":\"lfo_wave\",\"name\":\"LFO Wave\",\"type\":\"int\",\"min\":0,\"max\":5},"
+            "{\"key\":\"lfo_sync\",\"name\":\"LFO Sync\",\"type\":\"int\",\"min\":0,\"max\":1},");
+
+        /* Pitch EG params */
+        w += snprintf(buf + w, buf_len - w,
+            "{\"key\":\"pitch_eg_r1\",\"name\":\"PEG R1\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_r2\",\"name\":\"PEG R2\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_r3\",\"name\":\"PEG R3\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_r4\",\"name\":\"PEG R4\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_l1\",\"name\":\"PEG L1\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_l2\",\"name\":\"PEG L2\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_l3\",\"name\":\"PEG L3\",\"type\":\"int\",\"min\":0,\"max\":99},"
+            "{\"key\":\"pitch_eg_l4\",\"name\":\"PEG L4\",\"type\":\"int\",\"min\":0,\"max\":99},");
+
+        /* Per-operator params for all 6 operators - all use int type for Shadow UI compatibility */
+        for (int op = 1; op <= 6; op++) {
+            w += snprintf(buf + w, buf_len - w,
+                "{\"key\":\"op%d_level\",\"name\":\"Op%d Lvl\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_coarse\",\"name\":\"Op%d Crs\",\"type\":\"int\",\"min\":0,\"max\":31},"
+                "{\"key\":\"op%d_fine\",\"name\":\"Op%d Fin\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_detune\",\"name\":\"Op%d Det\",\"type\":\"int\",\"min\":-7,\"max\":7},"
+                "{\"key\":\"op%d_osc_mode\",\"name\":\"Op%d Mode\",\"type\":\"int\",\"min\":0,\"max\":1},"
+                "{\"key\":\"op%d_vel_sens\",\"name\":\"Op%d Vel\",\"type\":\"int\",\"min\":0,\"max\":7},"
+                "{\"key\":\"op%d_amp_mod\",\"name\":\"Op%d AMS\",\"type\":\"int\",\"min\":0,\"max\":3},"
+                "{\"key\":\"op%d_rate_scale\",\"name\":\"Op%d RS\",\"type\":\"int\",\"min\":0,\"max\":7},",
+                op, op, op, op, op, op, op, op, op, op, op, op, op, op, op, op);
+
+            /* Operator EG */
+            w += snprintf(buf + w, buf_len - w,
+                "{\"key\":\"op%d_eg_r1\",\"name\":\"Op%d R1\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_r2\",\"name\":\"Op%d R2\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_r3\",\"name\":\"Op%d R3\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_r4\",\"name\":\"Op%d R4\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_l1\",\"name\":\"Op%d L1\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_l2\",\"name\":\"Op%d L2\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_l3\",\"name\":\"Op%d L3\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_eg_l4\",\"name\":\"Op%d L4\",\"type\":\"int\",\"min\":0,\"max\":99},",
+                op, op, op, op, op, op, op, op, op, op, op, op, op, op, op, op);
+
+            /* Operator kbd scaling - using int (0-3) instead of enum for Shadow UI compatibility */
+            w += snprintf(buf + w, buf_len - w,
+                "{\"key\":\"op%d_key_bp\",\"name\":\"Op%d BP\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_key_ld\",\"name\":\"Op%d LD\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_key_rd\",\"name\":\"Op%d RD\",\"type\":\"int\",\"min\":0,\"max\":99},"
+                "{\"key\":\"op%d_key_lc\",\"name\":\"Op%d LC\",\"type\":\"int\",\"min\":0,\"max\":3},"
+                "{\"key\":\"op%d_key_rc\",\"name\":\"Op%d RC\",\"type\":\"int\",\"min\":0,\"max\":3}%s",
+                op, op, op, op, op, op, op, op, op, op, op < 6 ? "," : "");
+        }
+
+        w += snprintf(buf + w, buf_len - w, "]");
+        return w;
+    }
+    /* State serialization for patch save/load */
+    if (strcmp(key, "state") == 0) {
+        /* Save bank by name for robustness (index can change if banks added/removed) */
+        const char *bank_name = "";
+        if (inst->syx_bank_count > 0 && inst->syx_bank_index < inst->syx_bank_count) {
+            bank_name = inst->syx_banks[inst->syx_bank_index].name;
+        }
+        /* Build state JSON with all editable params */
+        int w = 0;
+        w += snprintf(buf + w, buf_len - w,
+            "{\"syx_bank_name\":\"%s\",\"syx_bank_index\":%d,\"preset\":%d,\"octave_transpose\":%d,\"output_level\":%d,"
+            "\"algorithm\":%d,\"feedback\":%d,\"osc_sync\":%d,\"transpose\":%d,"
+            "\"lfo_speed\":%d,\"lfo_delay\":%d,\"lfo_pmd\":%d,\"lfo_amd\":%d,\"lfo_wave\":%d,\"lfo_sync\":%d,\"lfo_pms\":%d,"
+            "\"pitch_eg_r1\":%d,\"pitch_eg_r2\":%d,\"pitch_eg_r3\":%d,\"pitch_eg_r4\":%d,"
+            "\"pitch_eg_l1\":%d,\"pitch_eg_l2\":%d,\"pitch_eg_l3\":%d,\"pitch_eg_l4\":%d",
+            bank_name, inst->syx_bank_index, inst->current_preset, inst->octave_transpose, inst->output_level,
+            inst->algorithm, inst->feedback, inst->osc_sync, inst->transpose,
+            inst->lfo_speed, inst->lfo_delay, inst->lfo_pmd, inst->lfo_amd, inst->lfo_wave, inst->lfo_sync, inst->lfo_pms,
+            inst->pitch_eg_r1, inst->pitch_eg_r2, inst->pitch_eg_r3, inst->pitch_eg_r4,
+            inst->pitch_eg_l1, inst->pitch_eg_l2, inst->pitch_eg_l3, inst->pitch_eg_l4);
+        /* Per-operator params */
+        for (int op = 0; op < 6; op++) {
+            w += snprintf(buf + w, buf_len - w,
+                ",\"op%d_level\":%d,\"op%d_coarse\":%d,\"op%d_fine\":%d,\"op%d_detune\":%d,"
+                "\"op%d_eg_r1\":%d,\"op%d_eg_r2\":%d,\"op%d_eg_r3\":%d,\"op%d_eg_r4\":%d,"
+                "\"op%d_eg_l1\":%d,\"op%d_eg_l2\":%d,\"op%d_eg_l3\":%d,\"op%d_eg_l4\":%d,"
+                "\"op%d_vel_sens\":%d,\"op%d_amp_mod\":%d,\"op%d_osc_mode\":%d,\"op%d_rate_scale\":%d,"
+                "\"op%d_key_bp\":%d,\"op%d_key_ld\":%d,\"op%d_key_rd\":%d,\"op%d_key_lc\":%d,\"op%d_key_rc\":%d",
+                op+1, inst->op_levels[op], op+1, inst->op_coarse[op], op+1, inst->op_fine[op], op+1, inst->op_detune[op],
+                op+1, inst->op_eg_r1[op], op+1, inst->op_eg_r2[op], op+1, inst->op_eg_r3[op], op+1, inst->op_eg_r4[op],
+                op+1, inst->op_eg_l1[op], op+1, inst->op_eg_l2[op], op+1, inst->op_eg_l3[op], op+1, inst->op_eg_l4[op],
+                op+1, inst->op_vel_sens[op], op+1, inst->op_amp_mod[op], op+1, inst->op_osc_mode[op], op+1, inst->op_rate_scale[op],
+                op+1, inst->op_key_bp[op], op+1, inst->op_key_ld[op], op+1, inst->op_key_rd[op], op+1, inst->op_key_lc[op], op+1, inst->op_key_rc[op]);
+        }
+        w += snprintf(buf + w, buf_len - w, "}");
+        return w;
+    }
+
+    return -1;
+}
+
+/* v2: Get error message */
+static int v2_get_error(void *instance, char *buf, int buf_len) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst || !inst->load_error[0]) {
+        return 0;  /* No error */
+    }
+    int len = strlen(inst->load_error);
+    if (len >= buf_len) len = buf_len - 1;
+    memcpy(buf, inst->load_error, len);
+    buf[len] = '\0';
+    return len;
+}
+
+/* v2: Render block */
+static void v2_render_block(void *instance, int16_t *out, int frames) {
+    dx7_instance_t *inst = (dx7_instance_t*)instance;
+    if (!inst) {
+        memset(out, 0, frames * 2 * sizeof(int16_t));
+        return;
+    }
+
+    /* Clear output */
+    memset(out, 0, frames * 2 * sizeof(int16_t));
+
+    /* Process in N-sample blocks */
+    int remaining = frames;
+    int out_pos = 0;
+
+    while (remaining > 0) {
+        int block_size = (remaining > N) ? N : remaining;
+
+        /* Clear render buffer */
+        memset(inst->render_buffer, 0, sizeof(inst->render_buffer));
+
+        /* Get LFO values */
+        int32_t lfo_val = inst->lfo.getsample();
+        int32_t lfo_delay = inst->lfo.getdelay();
+
+        /* Count active voices and render */
+        inst->active_voices = 0;
+        for (int v = 0; v < MAX_VOICES; v++) {
+            if (inst->voice_note[v] >= 0 || inst->voices[v]->isPlaying()) {
+                inst->voices[v]->compute(inst->render_buffer, lfo_val, lfo_delay, &inst->controllers);
+
+                if (!inst->voices[v]->isPlaying()) {
+                    inst->voice_note[v] = -1;  /* Voice finished */
+                } else {
+                    inst->active_voices++;
+                }
+            }
+        }
+
+        /* Convert to stereo int16 output */
+        for (int i = 0; i < block_size; i++) {
+            int32_t val = inst->render_buffer[i] >> 4;
+            val = (val * inst->output_level) / 100;
+
+            int16_t sample;
+            if (val < -(1 << 24)) {
+                sample = -32768;
+            } else if (val >= (1 << 24)) {
+                sample = 32767;
+            } else {
+                sample = (int16_t)(val >> 9);
+            }
+
+            out[out_pos * 2] = sample;
+            out[out_pos * 2 + 1] = sample;
+            out_pos++;
+        }
+
+        remaining -= block_size;
+    }
+}
+
+/* v2 API struct */
+static plugin_api_v2_t g_plugin_api_v2;
+
+/* v2 Entry Point */
+extern "C" plugin_api_v2_t* move_plugin_init_v2(const host_api_v1_t *host) {
+    g_host = host;
+
+    memset(&g_plugin_api_v2, 0, sizeof(g_plugin_api_v2));
+    g_plugin_api_v2.api_version = MOVE_PLUGIN_API_VERSION_2;
+    g_plugin_api_v2.create_instance = v2_create_instance;
+    g_plugin_api_v2.destroy_instance = v2_destroy_instance;
+    g_plugin_api_v2.on_midi = v2_on_midi;
+    g_plugin_api_v2.set_param = v2_set_param;
+    g_plugin_api_v2.get_param = v2_get_param;
+    g_plugin_api_v2.get_error = v2_get_error;
+    g_plugin_api_v2.render_block = v2_render_block;
+
+    plugin_log("V2 API initialized");
+
+    return &g_plugin_api_v2;
+}

@@ -35,7 +35,7 @@ python3 "$MPC_VST/tools/release.py" \
   --skin "$here/build/skin/sd88me - VST - DX7 (Dexed)" \
   --entry "$here/build/pluginlist-entry.xml" \
   --version "$VERSION" \
-  --extra "$here/.scratch/schwung-dx7/banks:vst/dx7_carts" \
+  --extra "$here/banks:vst/dx7_carts" \
   --about "6-operator FM synthesis (Dexed/MSFA via schwung-dx7), with the DX7-editor LCD touchscreen skin ported from force-dx7." \
   "${BENCH_ARGS[@]}" \
   -o "$here/dist"
