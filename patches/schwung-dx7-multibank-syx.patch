@@ -1,5 +1,5 @@
 diff --git a/src/dsp/dx7_plugin.cpp b/src/dsp/dx7_plugin.cpp
-index e8cab41..e9f1355 100644
+index e8cab41..7b5d8ed 100644
 --- a/src/dsp/dx7_plugin.cpp
 +++ b/src/dsp/dx7_plugin.cpp
 @@ -72,10 +72,14 @@ typedef struct plugin_api_v2 {
@@ -92,7 +92,22 @@ index e8cab41..e9f1355 100644
      plugin_log(msg);
  
      return 0;
-@@ -393,10 +418,52 @@ static void scan_syx_banks(dx7_instance_t *inst) {
+@@ -373,10 +398,12 @@ static int bank_entry_cmp(const void *a, const void *b) {
+     return strcasecmp(ba->name, bb->name);
+ }
+ 
+-/* Scan banks directory for .syx files */
++/* Scan banks directory for .syx files. This MPC VST port's MODULE_DIR (vst.json's "defines")
++ * points directly at the cart folder itself (e.g. /sdcard/vst/dx7_carts), not at a parent
++ * folder with its own "banks" subfolder -- unlike stock schwung-dx7's Move convention. */
+ static void scan_syx_banks(dx7_instance_t *inst) {
+     char dir_path[512];
+-    snprintf(dir_path, sizeof(dir_path), "%s/banks", inst->module_dir);
++    snprintf(dir_path, sizeof(dir_path), "%s", inst->module_dir);
+ 
+     inst->syx_bank_count = 0;
+ 
+@@ -393,10 +420,52 @@ static void scan_syx_banks(dx7_instance_t *inst) {
              break;
          }
  
@@ -149,7 +164,7 @@ index e8cab41..e9f1355 100644
      }
  
      closedir(dir);
-@@ -589,7 +656,7 @@ static void set_syx_bank_index(dx7_instance_t *inst, int index) {
+@@ -589,7 +658,7 @@ static void set_syx_bank_index(dx7_instance_t *inst, int index) {
      if (index >= inst->syx_bank_count) index = 0;
  
      inst->syx_bank_index = index;
@@ -158,7 +173,7 @@ index e8cab41..e9f1355 100644
      inst->current_preset = 0;  /* Reset to first patch in new bank */
      v2_select_preset(inst, 0);
  
-@@ -772,7 +839,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
+@@ -772,7 +841,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
      if (inst->syx_bank_count > 0) {
          /* Banks found - load the first one */
          inst->syx_bank_index = 0;
@@ -167,7 +182,7 @@ index e8cab41..e9f1355 100644
          if (syx_result != 0) {
              snprintf(inst->load_error, sizeof(inst->load_error),
                       "Failed to load bank: %s", inst->syx_banks[0].name);
-@@ -781,7 +848,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
+@@ -781,7 +850,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
          /* No banks found - try legacy patches.syx in module dir */
          char default_syx[512];
          snprintf(default_syx, sizeof(default_syx), "%s/patches.syx", module_dir);
@@ -176,7 +191,7 @@ index e8cab41..e9f1355 100644
          if (syx_result != 0) {
              snprintf(inst->load_error, sizeof(inst->load_error),
                       "No .syx banks found in banks/ folder");
-@@ -1251,7 +1318,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
+@@ -1251,7 +1320,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
      }
  
      if (strcmp(key, "syx_path") == 0) {
@@ -185,7 +200,7 @@ index e8cab41..e9f1355 100644
          if (inst->preset_count > 0) {
              v2_select_preset(inst, 0);
          }
-@@ -1612,7 +1679,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
+@@ -1612,7 +1681,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
      }
      /* Unified bank/preset parameters for Chain compatibility */
      if (strcmp(key, "bank_name") == 0) {
