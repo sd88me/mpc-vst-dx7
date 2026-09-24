@@ -1,0 +1,27 @@
+{
+  "name": "DX7 (schwung)",
+  "vendor": "sd88me",
+  "uid": "FDX2",
+  "version": 1000,
+  "so": "dx7_schwung.so",
+  "module": "module.json",
+  "layout": "layout.conf",
+  "build": {
+    "root": "../../.scratch/schwung-dx7",
+    "sources": [
+      "src/dsp/dx7_plugin.cpp",
+      "src/dsp/msfa/dx7note.cc",
+      "src/dsp/msfa/env.cc",
+      "src/dsp/msfa/exp2.cc",
+      "src/dsp/msfa/fm_core.cc",
+      "src/dsp/msfa/fm_op_kernel.cc",
+      "src/dsp/msfa/freqlut.cc",
+      "src/dsp/msfa/lfo.cc",
+      "src/dsp/msfa/pitchenv.cc",
+      "src/dsp/msfa/sin.cc",
+      "src/dsp/msfa/porta.cpp"
+    ],
+    "cflags": ["-Isrc/dsp"],
+    "libs": ["-lm"]
+  }
+}
