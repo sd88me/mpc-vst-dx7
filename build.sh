@@ -9,10 +9,23 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 MPC_VST="${MPC_VST:-$here/../..}"
+SCHWUNG="$here/../../.scratch/schwung-dx7"
 [ -x "$MPC_VST/tools/build_port.sh" ] || { echo "need an mpc-vst-plugins checkout (MPC_VST)" >&2; exit 1; }
-[ -f "$here/../../.scratch/schwung-dx7/src/dsp/dx7_plugin.cpp" ] || {
-  echo "need a schwung-dx7 checkout at $here/../../.scratch/schwung-dx7" >&2
-  echo "  git clone https://github.com/charlesvestal/schwung-dx7 $here/../../.scratch/schwung-dx7" >&2
-  exit 1
-}
+if [ ! -f "$SCHWUNG/src/dsp/dx7_plugin.cpp" ]; then
+  echo "cloning schwung-dx7 into $SCHWUNG ..." >&2
+  git clone https://github.com/charlesvestal/schwung-dx7 "$SCHWUNG"
+fi
+# patches/schwung-dx7-multibank-syx.patch: schwung-dx7's stock scan_syx_banks()/v2_load_syx()
+# only understand one 4104-byte DX7 bank per .syx file. We need multi-bank "ROM" cart dumps
+# (N*4104 bytes, banks concatenated back-to-back) to work too -- see docs/NOTES.md's "First
+# real interactive device test" entry. .scratch/ is gitignored (not vendored), so a fresh clone
+# here won't have this fix; apply it once, idempotently (git apply --check first).
+if [ -d "$SCHWUNG/.git" ] && ! git -C "$SCHWUNG" diff --quiet -- src/dsp/dx7_plugin.cpp 2>/dev/null; then
+  : # already patched (local changes present) -- don't try to apply again
+elif [ -f "$here/patches/schwung-dx7-multibank-syx.patch" ]; then
+  if git -C "$SCHWUNG" apply --check "$here/patches/schwung-dx7-multibank-syx.patch" 2>/dev/null; then
+    echo "applying schwung-dx7-multibank-syx.patch ..." >&2
+    git -C "$SCHWUNG" apply "$here/patches/schwung-dx7-multibank-syx.patch"
+  fi
+fi
 exec "$MPC_VST/tools/build_port.sh" "$here/vst.json"

@@ -1,0 +1,204 @@
+diff --git a/src/dsp/dx7_plugin.cpp b/src/dsp/dx7_plugin.cpp
+index e8cab41..e9f1355 100644
+--- a/src/dsp/dx7_plugin.cpp
++++ b/src/dsp/dx7_plugin.cpp
+@@ -72,10 +72,14 @@ typedef struct plugin_api_v2 {
+ #define MAX_PATCHES 128
+ #define MAX_SYX_BANKS 999
+ 
+-/* Bank entry for .syx file browsing */
++/* Bank entry for .syx file browsing. One physical .syx FILE can contain more than one
++ * logical 4104-byte DX7 bank back-to-back (a "ROM" cart dump, e.g. a 131328-byte file =
++ * 32 banks x 4104 bytes) -- sub_index is which 4104-byte slice within the file this entry
++ * is, so each logical bank still gets its own browsable syx_banks[] entry. */
+ typedef struct {
+     char path[512];
+     char name[128];
++    int sub_index;
+ } syx_bank_entry_t;
+ 
+ /* Host API reference */
+@@ -305,9 +309,22 @@ static void v2_init_default_patch(dx7_instance_t *inst) {
+ }
+ 
+ /* v2: Load syx file into instance */
+-static int v2_load_syx(dx7_instance_t *inst, const char *path) {
++#define DX7_BANK_FILE_SIZE 4104  /* one standard 32-voice DX7 bank: F0 43 00 09 20 00 + 32*128 + F7 */
++
++/* Loads the 4104-byte bank at byte offset (sub_index * DX7_BANK_FILE_SIZE) within `path`.
++ * A plain single-bank .syx (4104 bytes) is sub_index 0 of a 1-bank file; a multi-bank "ROM"
++ * dump (N*4104 bytes, all banks concatenated back-to-back with no extra header/padding
++ * between them -- the standard DX7 cartridge-dump convention) is sub_index 0..N-1. Callers
++ * are expected to have already validated sub_index against the file's own bank count (see
++ * scan_syx_banks()); this still re-checks defensively rather than trusting the caller. */
++static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
+     char msg[256];
+ 
++    if (sub_index < 0) {
++        plugin_log("v2_load_syx: negative sub_index");
++        return -1;
++    }
++
+     FILE *f = fopen(path, "rb");
+     if (!f) {
+         snprintf(msg, sizeof(msg), "Cannot open syx: %s", path);
+@@ -319,26 +336,34 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path) {
+     long size = ftell(f);
+     fseek(f, 0, SEEK_SET);
+ 
+-    /* Standard DX7 32-voice sysex is 4104 bytes */
+-    if (size != 4104) {
+-        snprintf(msg, sizeof(msg), "Invalid syx size: %ld (expected 4104)", size);
++    long offset = (long)sub_index * DX7_BANK_FILE_SIZE;
++    if (size < offset + DX7_BANK_FILE_SIZE) {
++        snprintf(msg, sizeof(msg), "syx bank %d out of range: %s is %ld bytes", sub_index, path, size);
+         plugin_log(msg);
+         fclose(f);
+         return -1;
+     }
+ 
+-    uint8_t *data = (uint8_t *)malloc(size);
++    uint8_t *data = (uint8_t *)malloc(DX7_BANK_FILE_SIZE);
+     if (!data) {
+         fclose(f);
+         return -1;
+     }
+ 
+-    fread(data, 1, size, f);
++    fseek(f, offset, SEEK_SET);
++    size_t got = fread(data, 1, DX7_BANK_FILE_SIZE, f);
+     fclose(f);
++    if (got != DX7_BANK_FILE_SIZE) {
++        snprintf(msg, sizeof(msg), "Short read on syx bank %d: %s", sub_index, path);
++        plugin_log(msg);
++        free(data);
++        return -1;
++    }
+ 
+     /* Verify sysex header: F0 43 00 09 20 00 */
+     if (data[0] != 0xF0 || data[1] != 0x43 || data[3] != 0x09) {
+-        plugin_log("Invalid DX7 sysex header");
++        snprintf(msg, sizeof(msg), "Invalid DX7 sysex header at bank %d of %s", sub_index, path);
++        plugin_log(msg);
+         free(data);
+         return -1;
+     }
+@@ -360,7 +385,7 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path) {
+     free(data);
+     strncpy(inst->patch_path, path, sizeof(inst->patch_path) - 1);
+ 
+-    snprintf(msg, sizeof(msg), "Loaded 32 patches from: %s", path);
++    snprintf(msg, sizeof(msg), "Loaded 32 patches from: %s (bank %d)", path, sub_index);
+     plugin_log(msg);
+ 
+     return 0;
+@@ -393,10 +418,52 @@ static void scan_syx_banks(dx7_instance_t *inst) {
+             break;
+         }
+ 
+-        syx_bank_entry_t *bank = &inst->syx_banks[inst->syx_bank_count++];
+-        snprintf(bank->path, sizeof(bank->path), "%s/%s", dir_path, entry->d_name);
+-        strncpy(bank->name, entry->d_name, sizeof(bank->name) - 1);
+-        bank->name[sizeof(bank->name) - 1] = '\0';
++        char full_path[600];
++        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
++
++        /* Size the file to find out how many back-to-back 4104-byte banks it holds -- a
++         * plain single bank (n=1) or a "ROM" cart dump with several banks concatenated with
++         * no header between them (n>1, e.g. a 131328-byte file = 32 banks). A size that
++         * isn't an exact multiple of DX7_BANK_FILE_SIZE isn't a valid DX7 bank file at all
++         * (truncated/corrupt/unrelated) -- skip it, don't add a broken entry. */
++        FILE *sf = fopen(full_path, "rb");
++        if (!sf) continue;
++        fseek(sf, 0, SEEK_END);
++        long fsize = ftell(sf);
++        fclose(sf);
++        if (fsize <= 0 || fsize % DX7_BANK_FILE_SIZE != 0) {
++            char skipmsg[600];
++            snprintf(skipmsg, sizeof(skipmsg), "Skipping %s: %ld bytes, not a multiple of %d",
++                     entry->d_name, fsize, DX7_BANK_FILE_SIZE);
++            plugin_log(skipmsg);
++            continue;
++        }
++        int n_banks = (int)(fsize / DX7_BANK_FILE_SIZE);
++
++        for (int sub = 0; sub < n_banks && inst->syx_bank_count < MAX_SYX_BANKS; sub++) {
++            syx_bank_entry_t *bank = &inst->syx_banks[inst->syx_bank_count++];
++            strncpy(bank->path, full_path, sizeof(bank->path) - 1);
++            bank->path[sizeof(bank->path) - 1] = '\0';
++            bank->sub_index = sub;
++            /* Display name: filename with .syx/.SYX stripped (matches the original
++             * single-bank-only display convention), plus a "[k/n]" suffix disambiguating
++             * each logical bank when a file holds more than one (a "ROM" cart dump). */
++            char base[128];
++            strncpy(base, entry->d_name, sizeof(base) - 1);
++            base[sizeof(base) - 1] = '\0';
++            char *ext = strrchr(base, '.');
++            if (ext && (strcasecmp(ext, ".syx") == 0)) *ext = '\0';
++            if (n_banks > 1) {
++                snprintf(bank->name, sizeof(bank->name), "%s [%d/%d]", base, sub + 1, n_banks);
++            } else {
++                strncpy(bank->name, base, sizeof(bank->name) - 1);
++                bank->name[sizeof(bank->name) - 1] = '\0';
++            }
++        }
++        if (inst->syx_bank_count >= MAX_SYX_BANKS) {
++            plugin_log("syx bank list full, skipping extras");
++            break;
++        }
+     }
+ 
+     closedir(dir);
+@@ -589,7 +656,7 @@ static void set_syx_bank_index(dx7_instance_t *inst, int index) {
+     if (index >= inst->syx_bank_count) index = 0;
+ 
+     inst->syx_bank_index = index;
+-    v2_load_syx(inst, inst->syx_banks[index].path);
++    v2_load_syx(inst, inst->syx_banks[index].path, inst->syx_banks[index].sub_index);
+     inst->current_preset = 0;  /* Reset to first patch in new bank */
+     v2_select_preset(inst, 0);
+ 
+@@ -772,7 +839,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
+     if (inst->syx_bank_count > 0) {
+         /* Banks found - load the first one */
+         inst->syx_bank_index = 0;
+-        syx_result = v2_load_syx(inst, inst->syx_banks[0].path);
++        syx_result = v2_load_syx(inst, inst->syx_banks[0].path, inst->syx_banks[0].sub_index);
+         if (syx_result != 0) {
+             snprintf(inst->load_error, sizeof(inst->load_error),
+                      "Failed to load bank: %s", inst->syx_banks[0].name);
+@@ -781,7 +848,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
+         /* No banks found - try legacy patches.syx in module dir */
+         char default_syx[512];
+         snprintf(default_syx, sizeof(default_syx), "%s/patches.syx", module_dir);
+-        syx_result = v2_load_syx(inst, default_syx);
++        syx_result = v2_load_syx(inst, default_syx, 0);  /* legacy fallback: always a plain single-bank file */
+         if (syx_result != 0) {
+             snprintf(inst->load_error, sizeof(inst->load_error),
+                      "No .syx banks found in banks/ folder");
+@@ -1251,7 +1318,7 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
+     }
+ 
+     if (strcmp(key, "syx_path") == 0) {
+-        v2_load_syx(inst, val);
++        v2_load_syx(inst, val, 0);  /* direct path load (syx_path key): always bank 0 of that file */
+         if (inst->preset_count > 0) {
+             v2_select_preset(inst, 0);
+         }
+@@ -1612,7 +1679,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
+     }
+     /* Unified bank/preset parameters for Chain compatibility */
+     if (strcmp(key, "bank_name") == 0) {
+-        /* Bank = syx filename (extract basename from patch_path) */
++        /* The scanned list entry's own display name -- already extension-stripped and,
++         * for a multi-bank "ROM" file, suffixed "[k/n]" so each logical bank reads
++         * distinctly (see scan_syx_banks()). Falls back to deriving from patch_path only
++         * when no bank list exists at all (e.g. the legacy single patches.syx path, which
++         * never populates syx_banks[]). */
++        if (inst->syx_bank_count > 0 && inst->syx_bank_index >= 0 && inst->syx_bank_index < inst->syx_bank_count) {
++            const char *n = inst->syx_banks[inst->syx_bank_index].name;
++            return snprintf(buf, buf_len, "%s", n[0] ? n : "Dexed");
++        }
+         const char *basename = strrchr(inst->patch_path, '/');
+         if (basename) {
+             basename++;  /* Skip the '/' */
