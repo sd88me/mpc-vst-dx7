@@ -6,6 +6,9 @@
   "so": "dx7_schwung.so",
   "module": "module.json",
   "layout": "layout.conf",
+  "defines": {
+    "MODULE_DIR": "\"/sdcard/vst/dx7_schwung_banks\""
+  },
   "build": {
     "root": "../..",
     "sources": [
