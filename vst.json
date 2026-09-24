@@ -1,13 +1,13 @@
 {
-  "name": "DX7 (schwung)",
+  "name": "DX7 (Dexed)",
   "vendor": "sd88me",
   "uid": "FDX2",
   "version": 1000,
-  "so": "dx7_schwung.so",
+  "so": "dx7_dexed.so",
   "module": "module.json",
   "layout": "layout.conf",
   "defines": {
-    "MODULE_DIR": "\"/sdcard/vst/dx7_schwung_banks\""
+    "MODULE_DIR": "\"/sdcard/vst/dx7_carts\""
   },
   "build": {
     "root": "../..",

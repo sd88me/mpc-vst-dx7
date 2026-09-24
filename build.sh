@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Build the schwung-dx7 (Dexed/MSFA) port as an MPC OS VST2 instrument via mpc-vst-plugins'
-# generic port builder (vst.json). DSP source: a checkout of
-# https://github.com/charlesvestal/schwung-dx7 at ../../.scratch/schwung-dx7 (gitignored,
-# not vendored into this repo -- see vst.json's build.root).
-#   vst-schwung/build/dx7_schwung.so      -> /sdcard/vst/ on the device
+# Build the DX7 (Dexed/MSFA) port as an MPC OS VST2 instrument via mpc-vst-plugins'
+# generic port builder (vst.json). DSP source (schwung-dx7's plugin_api_v2 build of
+# Dexed/MSFA): a checkout of https://github.com/charlesvestal/schwung-dx7 at
+# ../../.scratch/schwung-dx7 (gitignored, not vendored into this repo -- see vst.json's build.root).
+#   vst-schwung/build/dx7_dexed.so        -> /sdcard/vst/ on the device
 #   vst-schwung/build/skin/<folder>/      -> /sdcard/Synths/ on the device
 #   vst-schwung/build/pluginlist-entry.xml
 set -euo pipefail
