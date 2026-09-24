@@ -10,7 +10,7 @@
     "MODULE_DIR": "\"/sdcard/vst/dx7_carts\""
   },
   "build": {
-    "root": "../..",
+    "root": ".",
     "sources": [
       ".scratch/schwung-dx7/src/dsp/dx7_plugin.cpp",
       ".scratch/schwung-dx7/src/dsp/msfa/dx7note.cc",
