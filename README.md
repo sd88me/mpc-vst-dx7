@@ -64,6 +64,20 @@ The plugin's `MODULE_DIR` is baked in as `/sdcard/vst/dx7_carts` on the device �
 there (single 4104-byte banks or multi-bank ROM dumps, any size that's an exact multiple of 4104
 bytes) and they show up via the bank/patch stepper on the GLOBAL tab.
 
+## Credits
+
+- **Yamaha** — the original DX7 hardware and its 6-operator FM synthesis architecture.
+- **[asb2m10](https://github.com/asb2m10)** — [Dexed](https://github.com/asb2m10/dexed), the
+  original DX7 emulator/VST this all traces back to.
+- **Google** — [MSFA](https://github.com/google/music-synthesizer-for-android), the FM synthesis
+  core Dexed itself is built on (Apache-2.0, headers preserved as-is in `src/dsp/msfa/`).
+- **[charlesvestal](https://github.com/charlesvestal)** —
+  [schwung-dx7](https://github.com/charlesvestal/schwung-dx7), the `plugin_api_v2` build for Ableton
+  Move this port vendors directly (see `src/VENDORED.md`).
+- **[sd88me](https://github.com/sd88me)** — this MPC OS VST2 port, and
+  [force-dx7](https://github.com/sd88me/force-dx7) (the separate Force Shadow addon this skin's
+  layout and palette are ported from).
+
 ## Status
 
 Builds clean for armhf, real in-process audio confirmed (no IPC/shared-memory bridge — a plain
