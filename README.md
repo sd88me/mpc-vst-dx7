@@ -71,3 +71,5 @@ Builds clean for armhf, real in-process audio confirmed (no IPC/shared-memory br
 `tools/bench.sh` on real Force hardware with comfortable headroom. See the extracted git history
 (this repo split out of `mpc-vst-plugins`' `force-dx7/vst-schwung/`) for the full trail of bugs
 found and fixed along the way.
+[docs/NOTES.md](docs/NOTES.md) has the port's findings: the retired control-socket attempt, the switch to
+schwung-dx7, and each bug found on the device.
