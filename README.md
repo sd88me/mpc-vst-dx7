@@ -19,8 +19,8 @@ every port in that ecosystem.
 
 Needs a sibling checkout of [mpc-vst-plugins](https://github.com/sd88me/mpc-vst-plugins) (the shared
 wrapper, `build_port.sh`, skin tooling) at `../mpc-vst-plugins`, or set `MPC_VST` to point at one.
-Docker (with QEMU for arm32v7) and a `force-shadow` checkout are needed transitively by
-`mpc-vst-plugins`' build pipeline — see its own docs.
+Docker (with QEMU for arm32v7) is needed by `mpc-vst-plugins`' build pipeline; see its own docs. No
+`force-shadow` checkout is needed (mpc-vst-plugins vendors the skin renderer).
 
 ```
 ./build.sh
