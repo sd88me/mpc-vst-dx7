@@ -1,10 +1,7 @@
 **Dexed (DX7)** — a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
 Force), loaded by MPC's built-in JUCE plugin host with a native touchscreen skin (Q-Links included).
 
-6-operator FM synthesis via a vendored copy of [schwung-dx7](https://github.com/charlesvestal/schwung-dx7)
-(a `plugin_api_v2` build of the Dexed/MSFA engine, originally written for Ableton Move — see
-`src/VENDORED.md` for exactly what's vendored, from which commit, and our one local source change),
-wrapped as an MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling. The touchscreen skin and
+6-operator FM synthesis via build of the Dexed/MSFA engine, wrapped as an MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling. The touchscreen skin and
 cyan/slate DX7-editor theme are ported from [force-dx7](https://github.com/sd88me/force-dx7)'s Force
 Shadow page — this repo is purely the VST port; `force-dx7` remains the separate MockbaMod/Force
 Shadow addon for the Force's own on-device app (not a VST, no plugin host involved).
