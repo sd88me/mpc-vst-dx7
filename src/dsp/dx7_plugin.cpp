@@ -71,6 +71,8 @@ typedef struct plugin_api_v2 {
 #define DX7_PACKED_SIZE 128  /* Size of packed DX7 voice in .syx */
 #define MAX_PATCHES 128
 #define MAX_SYX_BANKS 999
+#define BANK_LIST_SLOTS 22   /* BANKS tab left list: cols=2 rows=11, same tile grid as jv880 */
+#define PATCH_LIST_SLOTS 32  /* BANKS tab right list: one syx bank's full 32 voices, no paging */
 
 /* Bank entry for .syx file browsing. One physical .syx FILE can contain more than one
  * logical 4104-byte DX7 bank back-to-back (a "ROM" cart dump, e.g. a 131328-byte file =
@@ -192,6 +194,7 @@ typedef struct {
     syx_bank_entry_t syx_banks[MAX_SYX_BANKS];
     int syx_bank_count;
     int syx_bank_index;
+    int bank_page;      /* BANKS tab: which page of the bank list is showing (22 tiles/page) */
 
     /* DX7 patch parameters (editable in realtime) */
     int algorithm;      /* Editable (0-31) */
@@ -203,6 +206,7 @@ typedef struct {
     int lfo_wave;       /* Editable (0-5) */
 
     /* Per-operator parameters */
+    int op_off[6];      /* operator switch (1 = muted); kept across patch loads, zero = on */
     int op_levels[6];   /* Editable (0-99) output level */
     int op_coarse[6];   /* Editable (0-31) frequency coarse */
     int op_fine[6];     /* Editable (0-99) frequency fine */
@@ -603,7 +607,7 @@ static void apply_patch_params(dx7_instance_t *inst) {
         inst->current_patch[base + 13] = inst->op_rate_scale[op];
         inst->current_patch[base + 14] = inst->op_amp_mod[op];
         inst->current_patch[base + 15] = inst->op_vel_sens[op];
-        inst->current_patch[base + 16] = inst->op_levels[op];
+        inst->current_patch[base + 16] = inst->op_off[op] ? 0 : inst->op_levels[op];
         inst->current_patch[base + 17] = inst->op_osc_mode[op];
         inst->current_patch[base + 18] = inst->op_coarse[op];
         inst->current_patch[base + 19] = inst->op_fine[op];
@@ -1369,9 +1373,42 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
     else if (strcmp(key, "prev_syx_bank") == 0) {
         set_syx_bank_index(inst, inst->syx_bank_index - 1);
     }
+    /* BANKS tab lists: unlike jv880 (all patches resident in RAM across banks), a DX7 .syx
+     * bank is only known by name until loaded, so there is no separate "browse" state --
+     * tapping a bank tile loads it immediately, same action as the GLOBAL bank stepper. */
+    else if (strncmp(key, "bank_slot_", 10) == 0) {
+        int slot = atoi(key + 10) - 1;
+        int idx = inst->bank_page * BANK_LIST_SLOTS + slot;
+        if (slot >= 0 && slot < BANK_LIST_SLOTS && idx < inst->syx_bank_count)
+            set_syx_bank_index(inst, idx);
+    }
+    else if (strncmp(key, "patch_slot_", 11) == 0) {
+        int slot = atoi(key + 11) - 1;
+        if (slot >= 0 && slot < PATCH_LIST_SLOTS && slot < inst->preset_count)
+            v2_select_preset(inst, slot);
+    }
+    else if (strcmp(key, "bank_page_next") == 0) {
+        int pages = (inst->syx_bank_count + BANK_LIST_SLOTS - 1) / BANK_LIST_SLOTS;
+        if (pages < 1) pages = 1;
+        inst->bank_page = (inst->bank_page + 1) % pages;
+    }
+    else if (strcmp(key, "bank_page_prev") == 0) {
+        int pages = (inst->syx_bank_count + BANK_LIST_SLOTS - 1) / BANK_LIST_SLOTS;
+        if (pages < 1) pages = 1;
+        inst->bank_page = (inst->bank_page - 1 + pages) % pages;
+    }
     /* DX7 parameters (editable) */
     else if (strcmp(key, "algorithm") == 0) {
         int v = atoi(val) - 1;  /* Input is 1-32, store as 0-31 */
+        if (v < 0) v = 0;
+        if (v > 31) v = 31;
+        inst->algorithm = v;
+        apply_patch_params(inst);
+    }
+    /* ALGORITHM tab picture: a 32-option mirror of "algorithm" (0-based index), because the
+     * skin's value pictures follow an option parameter, not an int one. */
+    else if (strcmp(key, "algorithm_view") == 0) {
+        int v = atoi(val);
         if (v < 0) v = 0;
         if (v > 31) v = 31;
         inst->algorithm = v;
@@ -1425,7 +1462,11 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         const char *param = key + 4;  /* Skip "opN_" */
         int v = atoi(val);
 
-        if (strcmp(param, "level") == 0) {
+        if (strcmp(param, "on") == 0) {
+            inst->op_off[op] = v ? 0 : 1;
+            apply_patch_params(inst);
+        }
+        else if (strcmp(param, "level") == 0) {
             if (v < 0) v = 0;
             if (v > 99) v = 99;
             inst->op_levels[op] = v;
@@ -1738,9 +1779,45 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         }
         return snprintf(buf, buf_len, "No banks");
     }
+    /* BANKS tab lists -- see the set_param handlers' comment for why bank tiles commit directly. */
+    {
+        size_t kl = strlen(key);
+        if (kl > 3 && strcmp(key + kl - 3, "_on") == 0) {
+            if (strncmp(key, "bank_slot_", 10) == 0) {
+                int slot = atoi(key + 10) - 1;
+                int idx = inst->bank_page * BANK_LIST_SLOTS + slot;
+                return snprintf(buf, buf_len, "%d", idx == inst->syx_bank_index ? 1 : 0);
+            }
+            if (strncmp(key, "patch_slot_", 11) == 0) {
+                int slot = atoi(key + 11) - 1;
+                return snprintf(buf, buf_len, "%d", slot == inst->current_preset ? 1 : 0);
+            }
+        }
+    }
+    if (strncmp(key, "bank_slot_", 10) == 0) {
+        int slot = atoi(key + 10) - 1;
+        int idx = inst->bank_page * BANK_LIST_SLOTS + slot;
+        if (slot < 0 || slot >= BANK_LIST_SLOTS || idx >= inst->syx_bank_count)
+            return snprintf(buf, buf_len, "");
+        return snprintf(buf, buf_len, "%s", inst->syx_banks[idx].name);
+    }
+    if (strncmp(key, "patch_slot_", 11) == 0) {
+        int slot = atoi(key + 11) - 1;
+        if (slot < 0 || slot >= PATCH_LIST_SLOTS || slot >= inst->preset_count)
+            return snprintf(buf, buf_len, "");
+        return snprintf(buf, buf_len, "%s", inst->patch_names[slot]);
+    }
+    if (strcmp(key, "bank_page_text") == 0) {
+        int pages = (inst->syx_bank_count + BANK_LIST_SLOTS - 1) / BANK_LIST_SLOTS;
+        if (pages < 1) pages = 1;
+        return snprintf(buf, buf_len, "PAGE %d/%d", inst->bank_page + 1, pages);
+    }
     /* DX7 parameters */
     if (strcmp(key, "algorithm") == 0) {
         return snprintf(buf, buf_len, "%d", inst->algorithm + 1);  /* Display as 1-32 */
+    }
+    if (strcmp(key, "algorithm_view") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->algorithm);
     }
     if (strcmp(key, "feedback") == 0) {
         return snprintf(buf, buf_len, "%d", inst->feedback);
@@ -1765,7 +1842,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         int op = key[2] - '1';  /* Convert '1'-'6' to 0-5 */
         const char *param = key + 4;  /* Skip "opN_" */
 
-        if (strcmp(param, "level") == 0) {
+        if (strcmp(param, "on") == 0) {
+            return snprintf(buf, buf_len, "%d", inst->op_off[op] ? 0 : 1);
+        }
+        else if (strcmp(param, "level") == 0) {
             return snprintf(buf, buf_len, "%d", inst->op_levels[op]);
         }
         else if (strcmp(param, "coarse") == 0) {

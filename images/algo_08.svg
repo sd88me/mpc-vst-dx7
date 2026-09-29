@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="470" viewBox="0 0 900 470">
+<g transform="translate(-74.94 -109.87) scale(6.104)" stroke-linecap="square" stroke-linejoin="miter">
+<g stroke="#009caf" stroke-width="1.1" fill="none">
+<line x1="111" y1="38" x2="111" y2="47"/>
+<line x1="111" y1="59" x2="111" y2="66"/>
+<line x1="86" y1="65" x2="111" y2="65"/>
+<line x1="86" y1="59" x2="86" y2="68"/>
+<line x1="86" y1="47" x2="86" y2="43"/>
+<line x1="86" y1="43" x2="75" y2="43"/>
+<line x1="75" y1="43" x2="75" y2="62"/>
+<line x1="75" y1="62" x2="86" y2="62"/>
+<line x1="86" y1="62" x2="86" y2="59"/>
+<line x1="86" y1="80" x2="86" y2="87"/>
+<line x1="61" y1="59" x2="61" y2="68"/>
+<line x1="61" y1="80" x2="61" y2="86"/>
+<line x1="61" y1="86" x2="87" y2="86"/>
+</g>
+<rect x="103" y="26" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="111" y="35" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">6</text>
+<rect x="103" y="47" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="111" y="56" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">5</text>
+<rect x="78" y="47" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="86" y="56" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">4</text>
+<rect x="78" y="68" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="86" y="77" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">3</text>
+<rect x="53" y="47" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="61" y="56" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">2</text>
+<rect x="53" y="68" width="16" height="12" rx="1.5" fill="#0b0d0e" stroke="#009caf" stroke-width="0.9"/>
+<text x="61" y="77" font-family="Titillium Web, Helvetica, Arial, sans-serif" font-size="9" font-weight="700" text-anchor="middle" fill="#d8dee2">1</text>
+</g></svg>

@@ -1,0 +1,19 @@
+/* skin studio: look */
+:root {
+  --title-size: 14px;
+  --font: "EurostileExtendedBlack", "Titillium Web", sans-serif;
+  --title-font: "EurostileExtendedBlack", "Titillium Web", sans-serif;
+}
+/* end skin studio */
+/* Skin stylesheet (the layout's art_css=), loaded after tools/html_art/default.css. Override its variables or
+ * classes: .knob-face, .knob-arc, .frame-border, .frame-title, .seg-bg, .button-bg, .box, .slider-thumb, ...
+ * Colours come from the layout's theme_* lines as var(--accent), var(--ink), ... */
+
+@font-face { font-family: "EurostileExtendedBlack"; src: url("EurostileExtendedBlack.ttf"); }
+
+@font-face { font-family: "FilmotypeFord"; src: url("FilmotypeFord.ttf"); }
+
+@font-face { font-family: "Helvetica"; src: url("Helvetica.ttf"); }
+
+/* Frame titles: Titillium at --title-size (vst.json's fixed-size title_font overlay was removed). */
+:root { --title-font: "Titillium Web", sans-serif; --title-size: 14px; --seg-size: 16px; --label-size: 18px; }

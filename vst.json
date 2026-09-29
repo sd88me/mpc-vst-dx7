@@ -1,11 +1,12 @@
 {
-  "name": "DX7 (Dexed)",
+  "name": "Dexed (DX7)",
   "vendor": "sd88me",
   "uid": "FDX2",
   "version": 1000,
   "so": "dx7_dexed.so",
   "module": "module.json",
   "layout": "layout.conf",
+  "art": "html",
   "defines": {
     "MODULE_DIR": "\"/sdcard/vst/dx7_carts\""
   },
