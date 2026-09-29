@@ -9,8 +9,7 @@ cyan/slate DX7-editor theme are ported from [force-dx7](https://github.com/sd88m
 Shadow page — this repo is purely the VST port; `force-dx7` remains the separate MockbaMod/Force
 Shadow addon for the Force's own on-device app (not a VST, no plugin host involved).
 
-<img width="640" height="400" alt="2026-09-29T100343483Z" src="https://github.com/user-attachments/assets/be0c4576-9921-4fca-894b-85747d8ebd08" />
-
+<img width="640" height="400" alt="2026-09-29T100343483Z" src="https://github.com/user-attachments/assets/be0c4576-9921-4fca-894b-85747d8ebd08" /><img width="640" height="400" alt="2026-09-29T100347135Z" src="https://github.com/user-attachments/assets/bc4792a0-3c24-4faa-96d3-910613d4506f" /><img width="640" height="400" alt="2026-09-29T100358065Z" src="https://github.com/user-attachments/assets/71fb35f1-e361-4171-98be-2c9c179aad13" />
 
 This repo is fully self-contained: no third-party source is fetched at build time. The only external
 dependency is a sibling checkout of `mpc-vst-plugins` for the shared wrapper/build tooling, same as
