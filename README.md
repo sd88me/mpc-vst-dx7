@@ -1,65 +1,132 @@
-**Dexed (DX7)** — a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
-Force), loaded by MPC's built-in JUCE plugin host with a native touchscreen skin (Q-Links included).
+# Dexed (DX7) VST Plugin for MPC OS
 
-6-operator FM synthesis via build of the Dexed/MSFA engine, wrapped as an MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling. The touchscreen skin and
-cyan/slate DX7-editor theme are ported from [force-dx7](https://github.com/sd88me/force-dx7)'s Force
-Shadow page — this repo is purely the VST port; `force-dx7` remains the separate MockbaMod/Force
-Shadow addon for the Force's own on-device app (not a VST, no plugin host involved).
+**Dexed (DX7)** as a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
+Force). It loads in MPC's built-in plugin host and has its own touchscreen skin with Q-Link support.
+
+Current release: **v1.0.0** — see [Releases](https://github.com/sd88me/mpc-vst-dx7/releases).
+
+## Screenshots
 
 <img width="640" height="400" alt="2026-09-29T100343483Z" src="https://github.com/user-attachments/assets/be0c4576-9921-4fca-894b-85747d8ebd08" /><img width="640" height="400" alt="2026-09-29T100347135Z" src="https://github.com/user-attachments/assets/bc4792a0-3c24-4faa-96d3-910613d4506f" /><img width="640" height="400" alt="2026-09-29T100358065Z" src="https://github.com/user-attachments/assets/71fb35f1-e361-4171-98be-2c9c179aad13" />
 
-This repo is fully self-contained: no third-party source is fetched at build time. The only external
-dependency is a sibling checkout of `mpc-vst-plugins` for the shared wrapper/build tooling, same as
-every port in that ecosystem.
+## Features
 
-## Build
+- Yamaha DX7-style 6-operator FM synthesis (the Dexed/MSFA engine), with all 32 algorithms, feedback,
+  oscillator sync, the LFO (six waveforms, key sync) and the pitch envelope.
+- **GLOBAL page**: bank and patch steppers with live names along the top, then voice (preset, algorithm,
+  feedback, output, octave, transpose, oscillator sync), LFO and pitch envelope.
+- **OP1-6 pages**: one page per operator with level, coarse, fine, detune, velocity sensitivity, amp
+  mod sensitivity, rate scaling, RATIO/FIXED mode, key scaling (breakpoint, depths, curves), the
+  four-stage envelope and an **ON** switch that mutes the operator. A small diagram of the current
+  algorithm sits on every operator page.
+- **ALGORITHM page**: Dexed's own diagram for each of the 32 algorithms (drawn from Dexed's layout
+  table), following the algorithm and feedback knobs and the patch you load.
+- **BANKS page**: a paginated list of every `.syx` bank on the device and the 32 patches of the loaded
+  bank; tap a bank to load it, tap a patch to play it.
+- **`.syx` carts**: single 4104-byte banks or multi-bank ROM dumps (any size that is an exact multiple
+  of 4104 bytes). A set of factory banks is included in the release zip.
+- 16 Q-Links per page, following the page you are on.
+- Dark slate panel with the DX7's "DX Green" accent and a light-grey LCD-style readout for bank and
+  patch names.
+
+## Requirements
+
+- A first-generation MPC OS standalone device (32-bit ARM: Force, MPC Live / Live II, One, X, Key 61).
+  Tested on a Force.
+- Root SSH access to the device. Installing plugins this way is unofficial: back up first, use at your
+  own risk.
+
+## Install
+
+1. Download `Dexed-DX7-1.0.0-mpc-armv7.zip` from the [latest release](https://github.com/sd88me/mpc-vst-dx7/releases/latest)
+   and unzip it.
+2. Copy the folder to the device and run the installer (it stops MPC, so save your project first):
+
+   ```
+   scp -r Dexed-DX7-1.0.0 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Dexed-DX7-1.0.0/install.sh
+   ```
+
+3. Add **Dexed (DX7)** to a track from the plugin browser (Instrument plugins).
+
+The zip's `INSTALL.md` has the manual steps and the uninstall command. Running the installer again
+upgrades in place. After replacing the plugin file on a running device, remove and re-insert the plugin
+on any track that uses it. If you had 0.4.0 (called "DX7 (Dexed)"), the old skin folder
+`/sdcard/Synths/sd88me - VST - DX7 (Dexed)` is left behind and can be deleted.
+
+### Bank and patch carts
+
+The plugin reads `.syx` files from `/sdcard/vst/dx7_carts` on the device. The installer puts the
+factory banks there; drop your own files in the same folder and they appear in the bank stepper on the
+GLOBAL page and in the BANKS page's list.
+
+## Build from source
 
 Needs a sibling checkout of [mpc-vst-plugins](https://github.com/sd88me/mpc-vst-plugins) (the shared
 wrapper, `build_port.sh`, skin tooling) at `../mpc-vst-plugins`, or set `MPC_VST` to point at one.
-Docker (with QEMU for arm32v7) is needed by `mpc-vst-plugins`' build pipeline; see its own docs. No
-`force-shadow` checkout is needed (mpc-vst-plugins vendors the skin renderer).
+Docker (with QEMU for arm32v7) is needed by its build pipeline.
 
 ```
 ./build.sh
 ```
 
-Builds the vendored `src/dsp/` via `mpc-vst-plugins/tools/build_port.sh` — no network fetch. Output
-in `build/`: `dx7_dexed.so`, the skin folder, and `pluginlist-entry.xml`.
-
-## Install (just want it working on your MPC/Force)
-
-Grab the latest release zip from the [Releases page](https://github.com/sd88me/mpc-vst-dx7/releases) —
-no build tools needed. It unpacks to a folder with the built plugin, a default set of factory DX7
-banks, and a script that does the whole install for you:
+Output in `build/`: `dx7_dexed.so`, the skin folder, and `pluginlist-entry.xml`. No third-party source is
+fetched at build time. To deploy by hand:
 
 ```
-scp -r DX7-Dexed-<version> root@<device-ip>:/tmp/
-ssh root@<device-ip> sh /tmp/DX7-Dexed-<version>/install.sh
+scp build/dx7_dexed.so root@<device-ip>:/sdcard/vst/dx7_dexed.so.new
+ssh root@<device-ip> 'mv /sdcard/vst/dx7_dexed.so.new /sdcard/vst/dx7_dexed.so'
+tar -C build/skin -cf - "sd88me - VST - Dexed (DX7)" | ssh root@<device-ip> 'tar -C /sdcard/Synths -xf -'
 ```
 
-That stops MPC, copies the plugin + skin + banks into place, registers it in `MPC.settings`
-(backed up first), and starts MPC again. `uninstall.sh` reverses it. Full details, requirements and
-a manual/no-script install path are in the zip's own `INSTALL.md`.
+A skin-only change needs no MPC restart: re-insert the plugin or reload the project. Registering the
+plugin in `MPC.settings` and the rest of the device workflow are in `mpc-vst-plugins`'
+`docs/PORTING.md` and `.claude/skills/mpc-vst-plugin/SKILL.md`.
 
-## Release (build + package a shareable zip)
+The skin fonts `EurostileExtendedBlack.ttf`, `Helvetica.ttf` and `FilmotypeFord.ttf` (used for the DEXED
+logo text and `skin.css`) are not in the repo. Put your own copies in `fonts/` and next to `skin.css`,
+or change the `text` line in `layout.conf`, before building the skin.
 
-```
-./release.sh <version>              # e.g. ./release.sh 1.0.0
-./release.sh <version> <device-ip>  # also runs tools/bench.sh on a real device first
-```
+To package a release zip: `./release.sh <version> [device-ip]` (see `mpc-vst-plugins`' `docs/RELEASING.md`).
+The 32 algorithm diagrams in `images/` are generated by `tools/gen_algo_svgs.py`.
 
-Builds, generates an offline skin preview (`build/preview_*.png` — look at these before shipping),
-and packages everything via `mpc-vst-plugins/tools/release.py` into
-`dist/DX7-Dexed-<version>-mpc-armv7.zip`: the `.so`, the skin, a default `dx7_carts` bank folder
-(`banks/`, schwung-dx7's own vendored factory banks), `install.sh`/`uninstall.sh`, a generated `INSTALL.md` and
-`SHA256SUMS`. See `mpc-vst-plugins/docs/RELEASING.md` for the full checklist (device smoke test
-before publishing, versioning rules, `gh release create`).
+## Status
 
-## Bank/patch carts
+v1.0.0. Builds clean for armhf and runs on a real Force: audio, bank and patch loading, live names, the
+operator switches, the algorithm diagrams and Q-Link control are checked on that hardware. The release
+zip was not run through its own `install.sh` on a device before publishing; the plugin and skin it
+contains are the ones tested.
 
-The plugin's `MODULE_DIR` is baked in as `/sdcard/vst/dx7_carts` on the device — drop `.syx` files
-there (single 4104-byte banks or multi-bank ROM dumps, any size that's an exact multiple of 4104
-bytes) and they show up via the bank/patch stepper on the GLOBAL tab.
+**CPU (Force, `tools/bench.sh`, 2026-09-29).** Worst block 15.7% of the audio budget and worst p99 8.3%
+(PASS):
+
+| State | mean | p99 |
+|---|---|---|
+| 1 voice | 0.9% | 1.4% |
+| 8 voices | 4.4% | 5.6% |
+| 16 voices | 5.3% | 6.1% |
+| Q-Link sweep | 2.6% | 8.3% |
+
+The synthesis runs in the audio callback, so unlike some other ports this bench measures all of it.
+
+The x86 host test (`tools/test_port.sh`) has one known failure, "set preset", because the test machine has
+no `/sdcard/vst/dx7_carts` folder to load presets from; it fails the same way on 0.4.0.
+
+## Background
+
+The sound engine is a vendored copy of [schwung-dx7](https://github.com/charlesvestal/schwung-dx7),
+a `plugin_api_v2` build of the Dexed/MSFA engine originally written for Ableton Move. `src/VENDORED.md`
+lists exactly what is vendored, from which commit, and our local source changes. It is wrapped as an
+MPC OS VST2 plugin with `mpc-vst-plugins`' shared tooling.
+
+The screen layout started from [force-dx7](https://github.com/sd88me/force-dx7)'s Force Shadow page,
+then was reworked for this plugin (the OP pages, ALGORITHM page, per-operator switches and palette are
+specific to this port). This repo is purely the VST port; `force-dx7` remains the separate
+MockbaMod/Force Shadow addon for the Force's own on-device app, a different architecture (a separate
+host process, not a VST).
+
+More detail: [docs/NOTES.md](docs/NOTES.md) (this port's findings, including the retired control-socket
+attempt and each bug found on the device), [src/VENDORED.md](src/VENDORED.md) (what is vendored and why).
 
 ## Credits
 
@@ -75,12 +142,7 @@ bytes) and they show up via the bank/patch stepper on the GLOBAL tab.
   [force-dx7](https://github.com/sd88me/force-dx7) (the separate Force Shadow addon this skin's
   layout and palette are ported from).
 
-## Status
+## License
 
-Builds clean for armhf, real in-process audio confirmed (no IPC/shared-memory bridge — a plain
-`plugin_api_v2` DSP callback), bank/patch loading and live text readouts working, passed
-`tools/bench.sh` on real Force hardware with comfortable headroom. See the extracted git history
-(this repo split out of `mpc-vst-plugins`' `force-dx7/vst-schwung/`) for the full trail of bugs
-found and fixed along the way.
-[docs/NOTES.md](docs/NOTES.md) has the port's findings: the retired control-socket attempt, the switch to
-schwung-dx7, and each bug found on the device.
+GPL-3.0 (see `LICENSE`). The algorithm diagrams follow the layout table in Dexed's `AlgoDisplay.cpp`
+(GPL-3.0); individual MSFA files keep their own Apache-2.0 headers.
