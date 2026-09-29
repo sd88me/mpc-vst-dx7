@@ -35,7 +35,7 @@ python3 "$MPC_VST/tools/release.py" \
   --skin "$here/build/skin/sd88me - VST - Dexed (DX7)" \
   --entry "$here/build/pluginlist-entry.xml" \
   --version "$VERSION" \
-  --extra "$here/banks:vst/dx7_carts" \
+  --extra "$here/banks:vst/dx7_carts" --user-data dx7_carts \
   --repo sd88me/mpc-vst-dx7 --license GPL-3.0-only --id dexed-dx7 \
   --requires "MPC OS standalone (Force/Live/One/X/Key) with root SSH access; 44.1 kHz" \
   --about "6-operator FM synthesis (Dexed/MSFA via schwung-dx7), with the DX7-editor LCD touchscreen skin ported from force-dx7." \

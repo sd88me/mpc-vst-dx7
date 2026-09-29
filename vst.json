@@ -8,6 +8,7 @@
   "layout": "layout.conf",
   "art": "html",
   "defines": {
+    "MODULE_SUBDIR": "\"dx7_carts\"",
     "MODULE_DIR": "\"/sdcard/vst/dx7_carts\""
   },
   "build": {
