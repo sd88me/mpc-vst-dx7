@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and package DX7 (Dexed) as one shareable zip: dist/DX7-Dexed-<version>-mpc-armv7.zip,
+# Build and package Dexed (DX7) as one shareable zip: dist/DX7-Dexed-<version>-mpc-armv7.zip,
 # containing the built .so, skin, install.sh/uninstall.sh and a generated INSTALL.md.
 #   ./release.sh <version>            e.g. ./release.sh 1.0.0
 #   ./release.sh <version> <bench-ip> also runs tools/bench.sh on a real device first and embeds
@@ -17,7 +17,7 @@ bash "$here/build.sh"
 
 echo "== skin preview ==" >&2
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$MPC_VST":/mv:ro -v "$here":/w -w /w python:3.11-slim sh -c \
-  'pip install --quiet --user Pillow && python3 /mv/tools/studio.py preview "build/skin/sd88me - VST - DX7 (Dexed)/Plugin Skins" -o build/preview_%d.png'
+  'pip install --quiet --user Pillow && python3 /mv/tools/studio.py preview "build/skin/sd88me - VST - Dexed (DX7)/Plugin Skins" -o build/preview_%d.png'
 echo "wrote $here/build/preview_*.png -- look at them before shipping" >&2
 
 BENCH_ARGS=()
@@ -32,10 +32,12 @@ fi
 echo "== package ==" >&2
 python3 "$MPC_VST/tools/release.py" \
   --so "$here/build/dx7_dexed.so" \
-  --skin "$here/build/skin/sd88me - VST - DX7 (Dexed)" \
+  --skin "$here/build/skin/sd88me - VST - Dexed (DX7)" \
   --entry "$here/build/pluginlist-entry.xml" \
   --version "$VERSION" \
   --extra "$here/banks:vst/dx7_carts" \
+  --repo sd88me/mpc-vst-dx7 --license GPL-3.0-only --id dexed-dx7 \
+  --requires "MPC OS standalone (Force/Live/One/X/Key) with root SSH access; 44.1 kHz" \
   --about "6-operator FM synthesis (Dexed/MSFA via schwung-dx7), with the DX7-editor LCD touchscreen skin ported from force-dx7." \
   "${BENCH_ARGS[@]}" \
   -o "$here/dist"

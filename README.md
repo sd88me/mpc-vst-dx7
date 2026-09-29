@@ -1,6 +1,6 @@
 # mpc-vst-dx7
 
-**DX7 (Dexed)** — a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
+**Dexed (DX7)** — a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
 Force), loaded by MPC's built-in JUCE plugin host with a native touchscreen skin (Q-Links included).
 
 6-operator FM synthesis via a vendored copy of [schwung-dx7](https://github.com/charlesvestal/schwung-dx7)
