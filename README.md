@@ -56,8 +56,8 @@ on any track that uses it. If you had 0.4.0 (called "DX7 (Dexed)"), the old skin
 
 ### Bank and patch carts
 
-The plugin reads `.syx` files from `/sdcard/vst/dx7_carts` on the device. The installer puts the
-factory banks there; drop your own files in the same folder and they appear in the bank stepper on the
+The plugin reads `.syx` files from the `dx7_carts` folder inside its own plugin folder
+(`/sdcard/Synths/sd88me - VST - Dexed (DX7)/dx7_carts`). The installer puts the factory banks there; drop your own files in the same folder and they appear in the bank stepper on the
 GLOBAL page and in the BANKS page's list.
 
 ## Build from source
@@ -71,12 +71,11 @@ Docker (with QEMU for arm32v7) is needed by its build pipeline.
 ```
 
 Output in `build/`: `dx7_dexed.so`, the skin folder, and `pluginlist-entry.xml`. No third-party source is
-fetched at build time. To deploy by hand:
+fetched at build time. To put a build on a device, package it and use the installer (the plugin is one folder in
+`/sdcard/Synths`, so there is nothing to copy by hand):
 
 ```
-scp build/dx7_dexed.so root@<device-ip>:/sdcard/vst/dx7_dexed.so.new
-ssh root@<device-ip> 'mv /sdcard/vst/dx7_dexed.so.new /sdcard/vst/dx7_dexed.so'
-tar -C build/skin -cf - "sd88me - VST - Dexed (DX7)" | ssh root@<device-ip> 'tar -C /sdcard/Synths -xf -'
+./release.sh <version>      # dist/Dexed-DX7-<version>-mpc-armv7.zip, then install it as described above
 ```
 
 A skin-only change needs no MPC restart: re-insert the plugin or reload the project. Registering the
@@ -110,7 +109,7 @@ contains are the ones tested.
 The synthesis runs in the audio callback, so unlike some other ports this bench measures all of it.
 
 The x86 host test (`tools/test_port.sh`) has one known failure, "set preset", because the test machine has
-no `/sdcard/vst/dx7_carts` folder to load presets from; it fails the same way on 0.4.0.
+no `dx7_carts` folder to load presets from; it fails the same way on 0.4.0.
 
 ## Background
 
