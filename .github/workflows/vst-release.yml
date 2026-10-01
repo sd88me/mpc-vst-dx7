@@ -18,13 +18,13 @@ on:
 
 jobs:
   release:
-    uses: sd88me/mpc-vst-plugins/.github/workflows/vst-release.yml@d55a4316ac57b08b5eec31a417559c1a5c3d11b9
+    uses: sd88me/mpc-vst-plugins/.github/workflows/vst-release.yml@7d366b83ef75c3ea2ae893ba03df8e93e5e274ec
     permissions:
       contents: write
     with:
       tag: dx7-v${{ inputs.version }}
       version: ${{ inputs.version }}
-      tools_ref: d55a4316ac57b08b5eec31a417559c1a5c3d11b9
+      tools_ref: 7d366b83ef75c3ea2ae893ba03df8e93e5e274ec
       vst_dir: .
       build: bash build.sh
       plugin_id: dexed-dx7
