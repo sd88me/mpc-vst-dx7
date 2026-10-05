@@ -2,7 +2,8 @@
 # Actions -> "VST release (draft)" -> Run workflow. Then install that draft's zip on a device,
 # smoke-test it, and publish the draft (see mpc-vst-plugins docs/RELEASING.md).
 # dry_run builds the zip and skin previews as run artifacts only.
-# tools_ref is pinned to a commit on mpc-vst-plugins main (the portable layout, installer -n and MODES, user_data input).
+# tools_ref is pinned to a commit on mpc-vst-plugins main (the portable layout, installer -n and MODES, user_data input, and for 1.0.5 the
+# wrapper's nudge_pct and the list order=cols that the BANKS page uses).
 name: VST release (draft)
 
 on:
@@ -18,13 +19,13 @@ on:
 
 jobs:
   release:
-    uses: sd88me/mpc-vst-plugins/.github/workflows/vst-release.yml@8dd6eabd79686c68169a892ab952094022cc9c11
+    uses: sd88me/mpc-vst-plugins/.github/workflows/vst-release.yml@6f8baf19ea990e2a8946ec23a66c120557099c72
     permissions:
       contents: write
     with:
       tag: dx7-v${{ inputs.version }}
       version: ${{ inputs.version }}
-      tools_ref: 8dd6eabd79686c68169a892ab952094022cc9c11
+      tools_ref: 6f8baf19ea990e2a8946ec23a66c120557099c72
       vst_dir: .
       build: bash build.sh
       plugin_id: dexed-dx7
