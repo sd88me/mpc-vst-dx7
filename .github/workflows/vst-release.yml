@@ -2,6 +2,8 @@
 # Actions -> "VST release (draft)" -> Run workflow. Then install that draft's zip on a device,
 # smoke-test it, and publish the draft (see mpc-vst-plugins docs/RELEASING.md).
 # dry_run builds the zip and skin previews as run artifacts only.
+# Note: this workflow cannot build Dexed (the skin's fonts are git-ignored, absent in CI); releases are built locally with ./release.sh and
+# uploaded with gh release create (docs/RELEASING.md in mpc-vst-plugins).
 # tools_ref is pinned to a commit on mpc-vst-plugins main (the portable layout, installer -n and MODES, user_data input, and for 1.0.5 the
 # wrapper's nudge_pct and the list order=cols that the BANKS page uses).
 name: VST release (draft)
