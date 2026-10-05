@@ -662,6 +662,7 @@ static void set_syx_bank_index(dx7_instance_t *inst, int index) {
     if (index >= inst->syx_bank_count) index = 0;
 
     inst->syx_bank_index = index;
+    inst->bank_page = index / BANK_LIST_SLOTS;   /* local change: the BANKS list shows the page the bank is on */
     v2_load_syx(inst, inst->syx_banks[index].path, inst->syx_banks[index].sub_index);
     inst->current_preset = 0;  /* Reset to first patch in new bank */
     v2_select_preset(inst, 0);

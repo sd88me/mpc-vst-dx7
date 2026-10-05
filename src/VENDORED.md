@@ -9,11 +9,13 @@ build time — applied one level up: we vendor schwung-dx7 rather than fetching 
 - **Vendored from**: https://github.com/charlesvestal/schwung-dx7, commit `86afe0062415b277ddc40611ec22ee804eb5d797` (`main`, v0.5.13)
 - **License**: GPL-3.0 (this repo's own `LICENSE`, copied from schwung-dx7's), individual MSFA files
   carry their own Apache-2.0 headers (Copyright Google Inc.) — both preserved as-is, unmodified.
-- **Our one local change**: `dsp/dx7_plugin.cpp`'s `scan_syx_banks()`/`v2_load_syx()`, to (a) scan
+- **Our local changes** to `dsp/dx7_plugin.cpp` (two): (1) `scan_syx_banks()`/`v2_load_syx()`, to (a) scan
   `MODULE_DIR` directly instead of `MODULE_DIR/banks/` (this port's convention differs from
   schwung-dx7's stock Move layout — see the main README) and (b) support multi-bank "ROM" `.syx`
   cart dumps (any file size that's an exact multiple of 4104 bytes = N banks, not just one bank per
-  file). Everything else in `dsp/` is byte-for-byte upstream.
+  file). (2) `set_syx_bank_index()` also sets `bank_page` (one line, marked `local change`), so stepping the bank with a Q-Link,
+  the wheel or the stepper arrows shows the BANKS page it lands on; without it the list's highlight leaves the visible page.
+  Everything else in `dsp/` is byte-for-byte upstream.
 
 `../banks/` (repo root, not under `src/`) is schwung-dx7's own bundled factory `.syx` banks
 (`Dexed_01.syx` + 32 `SynprezFM_NN.syx`), vendored the same way and from the same commit, shipped in
