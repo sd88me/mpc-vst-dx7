@@ -4,8 +4,10 @@
 
 > **MPC OS.** From 1.0.6 the skin is written in the format **MPC OS 2.x** draws, which MPC OS 3.x reads too, so the catalog
 > labels this release "MPC OS 2.x + 3.x". That label is a check of the skin and library against MPC OS 2.15.1's own skins,
-> not a test of this release on a 2.x unit: the same skin shape worked on a 2.15.1 MPC Live with 1.0.4's pages, and the
-> new BANKS page has been tried on a Force only. Reports from 2.x units are welcome. 1.0.5 and earlier are 3.x only.
+> not a test of this release on a 2.x unit. This exact skin (the 2.x shape with the new BANKS page) had not been tried on
+> any device when 1.0.6 was released: the 2.x shape with 1.0.4's pages worked on a Force and on a 2.15.1 MPC Live, and
+> 1.0.5's BANKS page worked on a Force in the 3.x shape. Reports from 2.x and 3.x units are welcome; 1.0.5 is the
+> fallback (3.x only).
 > See [MPC OS 2.x vs 3.x](https://github.com/sd88me/mpc-vst-plugins#mpc-os-2x-vs-3x) in the main repo.
 
 **Dexed (DX7)** as a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
