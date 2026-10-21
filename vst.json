@@ -4,6 +4,7 @@
   "uid": "FDX2",
   "version": 1000,
   "so": "dx7_dexed.so",
+  "targets": ["armv7", "aarch64"],
   "module": "module.json",
   "layout": "layout.conf",
   "art": "html",
