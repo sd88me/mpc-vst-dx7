@@ -70,7 +70,12 @@ typedef struct plugin_api_v2 {
 #define DX7_PATCH_SIZE 156   /* Size of unpacked DX7 voice data */
 #define DX7_PACKED_SIZE 128  /* Size of packed DX7 voice in .syx */
 #define MAX_PATCHES 128
-#define MAX_SYX_BANKS 999
+/* Bank list capacity. The list is allocated once per instance with calloc (see v2_create_instance()):
+ * a block this size is mapped lazily, so only the entries a scan fills take memory (~644 bytes per bank),
+ * and it never moves, so a rescan from get_param("syx_bank_list") can't leave a reader with a freed pointer.
+ * 999 hid most banks on devices with a large cart collection (4,500+ banks seen). Keep the "syx_bank_index"
+ * max in module.json at MAX_SYX_BANKS - 1. */
+#define MAX_SYX_BANKS 8192
 #define BANK_LIST_SLOTS 22   /* BANKS tab left list: cols=2 rows=11, same tile grid as jv880 */
 #define PATCH_LIST_SLOTS 32  /* BANKS tab right list: one syx bank's full 32 voices, no paging */
 
@@ -191,7 +196,7 @@ typedef struct {
     int output_level;
 
     /* Bank management */
-    syx_bank_entry_t syx_banks[MAX_SYX_BANKS];
+    syx_bank_entry_t *syx_banks;   /* MAX_SYX_BANKS entries, calloc'd in v2_create_instance() */
     int syx_bank_count;
     int syx_bank_index;
     int bank_page;      /* BANKS tab: which page of the bank list is showing (22 tiles/page) */
@@ -410,6 +415,7 @@ static void scan_syx_banks(dx7_instance_t *inst) {
     snprintf(dir_path, sizeof(dir_path), "%s", inst->module_dir);
 
     inst->syx_bank_count = 0;
+    if (!inst->syx_banks) return;
 
     DIR *dir = opendir(dir_path);
     if (!dir) return;
@@ -718,7 +724,8 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     /* Initialize bank management */
     inst->syx_bank_count = 0;
     inst->syx_bank_index = 0;
-    memset(inst->syx_banks, 0, sizeof(inst->syx_banks));
+    inst->syx_banks = (syx_bank_entry_t *)calloc(MAX_SYX_BANKS, sizeof(syx_bank_entry_t));
+    if (!inst->syx_banks) plugin_log("no memory for the bank list: banks disabled");
 
     /* Initialize DX7 parameters to defaults */
     inst->algorithm = 0;
@@ -887,6 +894,7 @@ static void v2_destroy_instance(void *instance) {
         }
     }
 
+    free(inst->syx_banks);
     plugin_log("Instance destroyed");
     delete inst;
 }
