@@ -3,3 +3,6 @@
 /fonts/
 /*.ttf
 *.bak
+/ref/
+/favourites.dat
+/favourites.dat.tmp
