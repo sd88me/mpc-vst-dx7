@@ -227,3 +227,4 @@ generate
 gen_style
 gen_amount
 mutate
+move

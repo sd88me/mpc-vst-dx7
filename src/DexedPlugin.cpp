@@ -122,6 +122,7 @@ public:
         else if (isDir("/sdcard/vst/dx7_carts")) cartDir_ = "/sdcard/vst/dx7_carts";
         else cartDir_ = folder + "/Content/carts";
         favPath_ = folder + "/favourites.dat";
+        moveIdx_ = findParam("move");
         loadFavourites();
         inst_ = v2_create_instance(cartDir_.c_str(), "{}");
         syncFromEngine();
@@ -453,10 +454,18 @@ private:
                 favChanged = true;
                 continue;
             }
+            if (!strcmp(s.key, "move"))
+            {
+                applyMove();
+                continue;
+            }
             if (!strcmp(s.key, "generate") || !strcmp(s.key, "mutate"))
             {
                 generateVoice(s.key[0] == 'm');
                 store((int)i, 0.0f);
+                seedMove();      // a new voice: seed its movement, and apply the MOVE slider as it stands
+                applyMove();
+                moveKeep_ = true;
                 resync = true;
                 continue;
             }
@@ -541,6 +550,8 @@ private:
         if (favChanged && !resync) displayDirty_.store(true);   // new names in the PRESET menu and the status text
         if (resync)
         {
+            if (!moveKeep_ && moveIdx_ >= 0) { store(moveIdx_, 0.0f); mv_.valid = false; }   // a patch loaded another way: no movement
+            moveKeep_ = false;
             syncFromEngine();
             displayDirty_.store(true);   // the worker makes the host call, never the audio thread
         }
@@ -554,7 +565,7 @@ private:
         for (size_t i = 1; i < t.size(); ++i)
         {
             dirty_[i].store(false);
-            if (t[i].flags & (kText | kMomentary)) continue;
+            if ((int)i == moveIdx_ || (t[i].flags & (kText | kMomentary))) continue;
             snprintf(val, sizeof(val), "%d", getInt((int)i));
             v2_set_param(inst_, t[i].key, val);
         }
@@ -576,7 +587,7 @@ private:
         for (size_t i = 0; i < t.size(); ++i)
         {
             const ParamSpec& s = t[i];
-            if (s.flags & (kText | kMomentary)) continue;
+            if ((int)i == moveIdx_ || (s.flags & (kText | kMomentary))) continue;
             buf[0] = 0;
             if (v2_get_param(inst_, s.key, buf, sizeof(buf)) <= 0 || !buf[0]) continue;
             store((int)i, (float)atoi(buf));
@@ -595,6 +606,7 @@ private:
         int modLo, modHi, fbLo, fbHi;
     };
 
+    int chaosFlavour_ = 0;
     int rr(int lo, int hi) { return hi <= lo ? lo : lo + (int)(rng_() % (unsigned)(hi - lo + 1)); }
     static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
     void gset(const char* fmt, int op, const char* what, int v)
@@ -628,6 +640,65 @@ private:
         gset("op%d_%s", o, "key_rc", on ? rr(0, 3) : 0);
     }
 
+    // MOVE slider: movement is SEEDED when a voice is generated or mutated (an LFO, and a wandering shape for each modulator), then the
+    // slider fades it in and out of that voice (0 = the voice as generated, 100 = full movement). A patch loaded any other way drops the
+    // seed and resets the slider; moving the slider then seeds a fresh movement for that patch.
+    struct MoveSeed
+    {
+        bool valid = false;
+        int wave = 0, speed = 20, delay = 0, pms = 4, pmd = 50, amd = 0;
+        int b_wave = 0, b_speed = 35, b_delay = 0, b_pms = 0, b_pmd = 0, b_amd = 0;
+        int base[6][5] = {}, delta[6][5] = {}, amod[6] = {}, b_amod[6] = {};
+    } mv_;
+    int moveIdx_ = -1;
+    bool moveKeep_ = false;
+
+    void seedMove()
+    {
+        MoveSeed& m = mv_;
+        m.valid = true;
+        m.b_wave = gets("lfo_wave"); m.b_speed = gets("lfo_speed"); m.b_delay = gets("lfo_delay");
+        m.b_pms = gets("lfo_pms"); m.b_pmd = gets("lfo_pmd"); m.b_amd = gets("lfo_amd");
+        m.wave = rr(0, 5); m.speed = rr(0, 99) < 60 ? rr(5, 50) : rr(50, 99); m.delay = rr(0, 2) ? 0 : rr(10, 50);
+        m.pms = rr(3, 7); m.pmd = rr(30, 99); m.amd = rr(0, 99) < 50 ? rr(20, 99) : 0;
+        const unsigned carriers = kAlgoCarriers[clampi(gets("algorithm"), 1, 32) - 1];
+        static const char* eg[5] = {"eg_r1", "eg_r2", "eg_r3", "eg_l2", "eg_l3"};
+        for (int o = 1; o <= 6; ++o)
+        {
+            const bool car = (carriers >> (o - 1)) & 1;
+            m.b_amod[o - 1] = gget("op%d_%s", o, "amp_mod");
+            m.amod[o - 1] = rr(0, 2) ? rr(0, 3) : 0;
+            for (int k = 0; k < 5; ++k)
+            {
+                m.base[o - 1][k] = gget("op%d_%s", o, eg[k]);
+                m.delta[o - 1][k] = car ? 0 : (k < 3 ? -rr(10, 45) : rr(-45, 45));   // carriers stay as they are
+            }
+        }
+    }
+
+    void applyMove()
+    {
+        if (moveIdx_ < 0) return;
+        const int a100 = clampi(getInt(moveIdx_), 0, 100);
+        if (!mv_.valid) seedMove();
+        const MoveSeed& m = mv_;
+        const float a = a100 / 100.0f;
+        auto lf = [&](const char* k, int v) { char b[16]; snprintf(b, sizeof(b), "%d", v); v2_set_param(inst_, k, b); };
+        auto mix = [&](int from, int to) { return from + (int)std::lround((to - from) * a); };
+        lf("lfo_wave", a100 > 0 ? m.wave : m.b_wave); lf("lfo_speed", a100 > 0 ? m.speed : m.b_speed); lf("lfo_delay", a100 > 0 ? m.delay : m.b_delay);
+        lf("lfo_pms", a100 > 0 ? std::max(m.b_pms, m.pms) : m.b_pms);
+        lf("lfo_pmd", mix(m.b_pmd, std::max(m.b_pmd, m.pmd))); lf("lfo_amd", mix(m.b_amd, std::max(m.b_amd, m.amd)));
+        static const char* eg[5] = {"eg_r1", "eg_r2", "eg_r3", "eg_l2", "eg_l3"};
+        for (int o = 1; o <= 6; ++o)
+        {
+            gset("op%d_%s", o, "amp_mod", mix(m.b_amod[o - 1], std::max(m.b_amod[o - 1], m.amod[o - 1])));
+            for (int k = 0; k < 5; ++k)
+                gset("op%d_%s", o, eg[k], clampi(m.base[o - 1][k] + (int)std::lround(m.delta[o - 1][k] * a), k < 3 ? 6 : 0, 99));
+        }
+        apply_patch_params((dx7_instance_t*)inst_);
+    }
+    int gets_op(int o, const char* what) { return gget("op%d_%s", o, what); }
+
     void generateVoice(bool mutate)
     {
         static const GenStyle styles[6] = {
@@ -642,6 +713,13 @@ private:
         static const GenStyle organ = {{99, 99, 99, 90}, {99, 99, 99, 0}, {99, 99, 99, 90}, {99, 99, 99, 0}, {1, 2, 3, 4, 6, 8}, 6, false, 20, 55, 0, 2};
         const int sv = styleValue();   // 0..5 a style, 6 = ALL (a random style each press), 7 = CHAOS (no rules)
         const bool chaos = sv >= 7;
+        if (chaos && !mutate)
+        {   // LFO movement: vibrato / growl / tremolo, chosen per press
+            chaosFlavour_ = rr(0, 4);
+            auto lf = [&](const char* k, int v) { char b[16]; snprintf(b, sizeof(b), "%d", v); v2_set_param(inst_, k, b); };
+            lf("lfo_wave", rr(0, 5)); lf("lfo_speed", rr(0, 99) < 50 ? rr(5, 45) : rr(45, 99)); lf("lfo_delay", rr(0, 3) ? 0 : rr(10, 60));
+            lf("lfo_pms", rr(0, 7)); lf("lfo_pmd", rr(0, 99) < 70 ? rr(10, 99) : 0); lf("lfo_amd", rr(0, 99) < 50 ? rr(10, 99) : 0);
+        }
         const int si = sv == 6 ? rr(0, 5) : clampi(sv, 0, 5);
         const GenStyle& st = (si == 5 && rr(0, 99) < 25) ? organ : styles[si];
         const int amount = clampi(amountValue(), 0, 100);
@@ -661,16 +739,22 @@ private:
             if (full && chaos)
             {   // CHAOS: anything goes. Only a guard so a patch is not silent: the first carrier is always audible.
                 const bool first = o == (int)(__builtin_ctz(carriers) + 1);
-                gset("op%d_%s", o, "osc_mode", rr(0, 99) < 12 ? 1 : 0);
-                gset("op%d_%s", o, "coarse", rr(0, 31));
-                gset("op%d_%s", o, "fine", rr(0, 1) ? rr(0, 99) : 0);
-                gset("op%d_%s", o, "detune", rr(-7, 7));
-                gset("op%d_%s", o, "level", first ? rr(80, 99) : rr(0, 99));
+                // flavour per press: 0 GROWL (low ratios, beating detune, hot feedback), 1 BUZZ (ratios 1-2, slow-moving modulators),
+                // 2 METAL (inharmonic, decaying), 3 SWEEP (slow evolving modulators), 4 ANYTHING (old behaviour, mostly low)
+                static const int lowPool[10] = {0, 0, 1, 1, 1, 2, 2, 3, 4, 5};
+                const int fl = chaosFlavour_;
+                gset("op%d_%s", o, "osc_mode", rr(0, 99) < 3 ? 1 : 0);
+                int ratio = fl == 1 ? rr(1, 2) : fl == 2 ? rr(2, 17) : fl == 4 ? (rr(0, 99) < 25 ? rr(0, 31) : lowPool[rr(0, 9)]) : lowPool[rr(0, 9)];
+                gset("op%d_%s", o, "coarse", car && rr(0, 99) < 60 ? lowPool[rr(0, 6)] : ratio);
+                gset("op%d_%s", o, "fine", fl == 2 ? rr(0, 99) : (rr(0, 2) == 0 ? rr(0, 99) : 0));
+                gset("op%d_%s", o, "detune", fl == 0 || fl == 1 ? rr(-7, 7) : rr(-4, 4));
+                gset("op%d_%s", o, "level", first ? rr(85, 99) : car ? rr(40, 99) : (fl == 3 ? rr(30, 85) : rr(20, 90)));
                 // a carrier always releases to silence (L4 = 0) in a few seconds at most (R4 >= 40), or a patch would ring on forever
-                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[k], first && k == 0 ? rr(40, 99) : (car && k == 3 ? rr(40, 99) : rr(5, 99)));
-                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[4 + k], first && k == 0 ? 99 : (car && k == 3 ? 0 : rr(0, 99)));
+                const bool slow = !car && (fl == 1 || fl == 3);
+                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[k], first && k == 0 ? rr(60, 99) : (car && k == 3 ? rr(40, 99) : slow ? rr(8, 55) : rr(5, 99)));
+                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[4 + k], first && k == 0 ? 99 : (car && k == 3 ? 0 : (slow && k == 0 ? rr(40, 99) : rr(0, 99))));
                 gset("op%d_%s", o, "vel_sens", rr(0, 7));
-                gset("op%d_%s", o, "amp_mod", rr(0, 3));
+                gset("op%d_%s", o, "amp_mod", rr(0, 2) ? rr(0, 3) : 0);
                 gset("op%d_%s", o, "rate_scale", rr(0, 7));
                 keyScaling(o, true);
             }
@@ -678,7 +762,8 @@ private:
             {
                 if (car)
                 {
-                    gset("op%d_%s", o, "coarse", 1); gset("op%d_%s", o, "fine", 0); gset("op%d_%s", o, "osc_mode", 0);
+                    { int r = rr(0, 99); gset("op%d_%s", o, "coarse", r < 94 ? 1 : r < 98 ? 2 : 0); }   // mostly the key note, sometimes an octave/fifth-ish colour
+                    gset("op%d_%s", o, "fine", rr(0, 9) == 0 ? rr(0, 8) : 0); gset("op%d_%s", o, "osc_mode", 0);
                     int lv = o == 1 || ncar == 1 ? 99 : rr(78, 99) - 4 * std::max(0, ncar - 3);
                     gset("op%d_%s", o, "level", clampi(lv, 60, 99));
                     gset("op%d_%s", o, "detune", rr(0, 2) ? 0 : rr(-5, 5));
@@ -686,21 +771,21 @@ private:
                 else
                 {
                     static const int wide[12] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15};
-                    int ratio = rr(0, 99) < 30 ? wide[rr(0, 11)] : st.ratios[rr(0, st.nratio - 1)];
+                    int ratio = rr(0, 99) < 15 ? wide[rr(0, 11)] : st.ratios[rr(0, st.nratio - 1)];
                     gset("op%d_%s", o, "coarse", ratio); gset("op%d_%s", o, "osc_mode", 0);
                     gset("op%d_%s", o, "fine", (st.inharm ? rr(0, 1) : rr(0, 9) == 0) ? rr(0, 60) : 0);
                     int ml = rr(st.modLo - 15, st.modHi + 10);
-                    if (rr(0, 3) == 0) ml = rr(10, 99);   // now and then a modulator off the style's range
+                    if (rr(0, 5) == 0) ml = rr(10, 99);   // now and then a modulator off the style's range
                     gset("op%d_%s", o, "level", clampi(ml, 0, 99));
                     gset("op%d_%s", o, "detune", rr(-3, 3));
                 }
                 const int* R = car ? st.cr : st.mr; const int* L = car ? st.cl : st.ml;
-                const bool wild = !car && rr(0, 99) < 35;   // a modulator with its own random shape instead of the style's
-                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[k], wild ? rr(15, 99) : clampi(R[k] + rr(-22, 14), car && k == 3 ? 40 : 8, 99));   // carrier release: never slower than R4 40
+                const bool wild = rr(0, 99) < (car ? 6 : 22);   // a modulator with its own random shape instead of the style's
+                for (int k = 0; k < 4; ++k) gset("op%d_%s", o, egName[k], wild ? rr(car && k == 3 ? 40 : 15, 99) : clampi(R[k] + rr(-22, 14), car && k == 3 ? 40 : 8, 99));   // carrier release: never slower than R4 40
                 gset("op%d_%s", o, "eg_l1", car ? 99 : clampi(wild ? rr(40, 99) : L[0] + rr(-25, 0), 30, 99));
-                for (int k = 1; k < 3; ++k) gset("op%d_%s", o, egName[4 + k], wild ? rr(0, 99) : clampi(L[k] + rr(-20, 16), 0, 99));
+                for (int k = 1; k < 3; ++k) gset("op%d_%s", o, egName[4 + k], wild ? rr(car && k == 2 ? 35 : 0, 99) : clampi(L[k] + rr(-20, 16), 0, 99));   // a carrier keeps an audible sustain
                 gset("op%d_%s", o, "eg_l4", 0);
-                gset("op%d_%s", o, "vel_sens", rr(0, 6));
+                gset("op%d_%s", o, "vel_sens", rr(0, 7));
                 gset("op%d_%s", o, "amp_mod", 0);
                 gset("op%d_%s", o, "rate_scale", rr(0, 4));
                 keyScaling(o, false);
@@ -730,7 +815,7 @@ private:
         // the voice itself: feedback; the pitch EG is flattened so notes do not glide (the key note stays put)
         if (full)
         {
-            char v[16]; snprintf(v, sizeof(v), "%d", chaos ? rr(0, 7) : rr(st.fbLo, std::min(7, st.fbHi + 2))); v2_set_param(inst_, "feedback", v);
+            char v[16]; snprintf(v, sizeof(v), "%d", chaos ? (chaosFlavour_ <= 1 ? rr(5, 7) : rr(2, 7)) : rr(st.fbLo, std::min(7, st.fbHi + 2))); v2_set_param(inst_, "feedback", v);
             if (!chaos) for (int k = 1; k <= 4; ++k)
             {
                 char key[24]; snprintf(key, sizeof(key), "pitch_eg_r%d", k); v2_set_param(inst_, key, "99");

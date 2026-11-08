@@ -267,7 +267,9 @@ def algo_page(fn):
                                                                 "numButtonsInGroup": 8, "handleName": "Data", "gestureBehaviour": "Instant"},
                                 "%d %d %d %d" % (x - 3, y - 3, sw + 6, 50), remap=tui.P("gen_style"), focus="Yes"))
     p.choices["gen_style"] = names
-    p.slider("gen_amount", gx, 238, gw, "MUTATE AMOUNT")
+    hw = (gw - 16) // 2
+    p.slider("gen_amount", gx, 238, hw, "MUTATE AMOUNT")
+    p.slider("move", gx + hw + 16, 238, hw, "MOVEMENT")
     # VOICE column (group 1)
     vx, vw = 24, 310
     p.header(vx, 334, 18, "VOICE")
@@ -295,7 +297,7 @@ def algo_page(fn):
         keys.append("op%d_level" % op)
     p.qlink_group((16, 386, 846, 624), keys[:4])
     p.qlink_group((850, 386, 1272, 624), keys[4:])
-    p.qlink_group((816, 100, 1272, 310), ["gen_style", "gen_amount"])
+    p.qlink_group((816, 100, 1272, 310), ["gen_style", "gen_amount", "move"])
     return p
 
 

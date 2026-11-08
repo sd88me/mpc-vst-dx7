@@ -369,6 +369,108 @@
           }
         },
         {
+          "key": "hslider202t",
+          "value": {
+            "version": 2,
+            "actions": [
+              {
+                "version": 1,
+                "onAction": "Mouse Down",
+                "handler": "Q-Link",
+                "handleName": "Data",
+                "additionalData": ""
+              },
+              {
+                "version": 1,
+                "onAction": "Double Click",
+                "handler": "Show Overlay",
+                "handleName": "Data",
+                "additionalData": "knob overlay"
+              },
+              {
+                "version": 1,
+                "onAction": "Enter Pressed",
+                "handler": "Show Overlay",
+                "handleName": "Data",
+                "additionalData": "knob overlay"
+              }
+            ],
+            "backgroundData": {
+              "version": 1,
+              "focussed": {
+                "version": 1,
+                "colour": "0",
+                "image": ""
+              },
+              "unfocussed": {
+                "version": 1,
+                "colour": "0",
+                "image": ""
+              }
+            },
+            "ignoreMousePresses": false,
+            "disableCoarseDataWheel": false,
+            "componentsData": [
+              {
+                "version": 2,
+                "componentData": {
+                  "version": 1,
+                  "name": "focus",
+                  "type": "Focus",
+                  "data": {
+                    "version": 1,
+                    "backgroundColour": "19ffffff",
+                    "outlineColour": "ffe81f40",
+                    "backgroundInset": 4.0,
+                    "outlineThickness": 1.0
+                  }
+                },
+                "handle remapping": {
+                  "version": 1,
+                  "map": []
+                },
+                "bounds": {
+                  "version": 1,
+                  "acceptsHWFocus": "No",
+                  "showWhenDataModelInvalid": "Show",
+                  "whenVisible": "WhenFocussed",
+                  "boundsType": "Absolute",
+                  "bounds": "-6 -30 214 66"
+                }
+              },
+              {
+                "version": 2,
+                "componentData": {
+                  "version": 1,
+                  "name": "strip",
+                  "type": "Knob",
+                  "data": {
+                    "version": 3,
+                    "knobType": "FilmStrip",
+                    "filmStrip": "slider_h_202t.png",
+                    "numFrames": 127,
+                    "invert": false,
+                    "dragOrientation": "Horizontal",
+                    "handleName": "Data"
+                  }
+                },
+                "handle remapping": {
+                  "version": 1,
+                  "map": []
+                },
+                "bounds": {
+                  "version": 1,
+                  "acceptsHWFocus": "No",
+                  "showWhenDataModelInvalid": "Show",
+                  "whenVisible": "Always",
+                  "boundsType": "Absolute",
+                  "bounds": "0 0 202 30"
+                }
+              }
+            ]
+          }
+        },
+        {
           "key": "hslider212tb",
           "value": {
             "version": 2,
@@ -771,108 +873,6 @@
                   "whenVisible": "Always",
                   "boundsType": "Absolute",
                   "bounds": "0 0 310 30"
-                }
-              }
-            ]
-          }
-        },
-        {
-          "key": "hslider420t",
-          "value": {
-            "version": 2,
-            "actions": [
-              {
-                "version": 1,
-                "onAction": "Mouse Down",
-                "handler": "Q-Link",
-                "handleName": "Data",
-                "additionalData": ""
-              },
-              {
-                "version": 1,
-                "onAction": "Double Click",
-                "handler": "Show Overlay",
-                "handleName": "Data",
-                "additionalData": "knob overlay"
-              },
-              {
-                "version": 1,
-                "onAction": "Enter Pressed",
-                "handler": "Show Overlay",
-                "handleName": "Data",
-                "additionalData": "knob overlay"
-              }
-            ],
-            "backgroundData": {
-              "version": 1,
-              "focussed": {
-                "version": 1,
-                "colour": "0",
-                "image": ""
-              },
-              "unfocussed": {
-                "version": 1,
-                "colour": "0",
-                "image": ""
-              }
-            },
-            "ignoreMousePresses": false,
-            "disableCoarseDataWheel": false,
-            "componentsData": [
-              {
-                "version": 2,
-                "componentData": {
-                  "version": 1,
-                  "name": "focus",
-                  "type": "Focus",
-                  "data": {
-                    "version": 1,
-                    "backgroundColour": "19ffffff",
-                    "outlineColour": "ffe81f40",
-                    "backgroundInset": 4.0,
-                    "outlineThickness": 1.0
-                  }
-                },
-                "handle remapping": {
-                  "version": 1,
-                  "map": []
-                },
-                "bounds": {
-                  "version": 1,
-                  "acceptsHWFocus": "No",
-                  "showWhenDataModelInvalid": "Show",
-                  "whenVisible": "WhenFocussed",
-                  "boundsType": "Absolute",
-                  "bounds": "-6 -30 432 66"
-                }
-              },
-              {
-                "version": 2,
-                "componentData": {
-                  "version": 1,
-                  "name": "strip",
-                  "type": "Knob",
-                  "data": {
-                    "version": 3,
-                    "knobType": "FilmStrip",
-                    "filmStrip": "slider_h_420t.png",
-                    "numFrames": 127,
-                    "invert": false,
-                    "dragOrientation": "Horizontal",
-                    "handleName": "Data"
-                  }
-                },
-                "handle remapping": {
-                  "version": 1,
-                  "map": []
-                },
-                "bounds": {
-                  "version": 1,
-                  "acceptsHWFocus": "No",
-                  "showWhenDataModelInvalid": "Show",
-                  "whenVisible": "Always",
-                  "boundsType": "Absolute",
-                  "bounds": "0 0 420 30"
                 }
               }
             ]
@@ -8647,7 +8647,7 @@
                 "showWhenDataModelInvalid": "Show",
                 "whenVisible": "Always",
                 "boundsType": "Absolute",
-                "bounds": "1146 233 110 24"
+                "bounds": "928 233 110 24"
               }
             },
             {
@@ -8655,7 +8655,7 @@
               "componentData": {
                 "version": 1,
                 "name": "gen_amount",
-                "type": "hslider420t",
+                "type": "hslider202t",
                 "data": {
                   "version": 1,
                   "handleName": "Data"
@@ -8676,7 +8676,78 @@
                 "showWhenDataModelInvalid": "Show",
                 "whenVisible": "Always",
                 "boundsType": "Absolute",
-                "bounds": "836 258 420 30"
+                "bounds": "836 258 202 30"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
+                "name": "label",
+                "type": "Label",
+                "data": {
+                  "version": 1,
+                  "textStyle": {
+                    "version": 1,
+                    "font": {
+                      "version": 1,
+                      "name": "Roboto",
+                      "style": "Medium",
+                      "height": 23.0
+                    },
+                    "colour": "fffff6e4",
+                    "justification": "right verticallyCentred",
+                    "case": "Upper Case"
+                  },
+                  "type": "Value",
+                  "handleName": "Data"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": [
+                  {
+                    "key": "Data",
+                    "value": "Parameter 229"
+                  }
+                ]
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "No",
+                "showWhenDataModelInvalid": "Show",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "1146 233 110 24"
+              }
+            },
+            {
+              "version": 2,
+              "componentData": {
+                "version": 1,
+                "name": "move",
+                "type": "hslider202t",
+                "data": {
+                  "version": 1,
+                  "handleName": "Data"
+                }
+              },
+              "handle remapping": {
+                "version": 1,
+                "map": [
+                  {
+                    "key": "Data",
+                    "value": "Parameter 229"
+                  }
+                ]
+              },
+              "bounds": {
+                "version": 1,
+                "acceptsHWFocus": "Yes",
+                "showWhenDataModelInvalid": "Show",
+                "whenVisible": "Always",
+                "boundsType": "Absolute",
+                "bounds": "1054 258 202 30"
               }
             },
             {

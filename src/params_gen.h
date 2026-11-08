@@ -242,6 +242,7 @@ static const std::vector<ParamSpec>& paramSpecs() {
     {"gen_style", "Gen Style", ParamSpec::Choice, 0, 7, 0, 0, {"PLUCK", "BELL", "PAD", "BASS", "EP", "LEAD", "ALL", "CHAOS"}},
     {"gen_amount", "Gen Amount", ParamSpec::Int, 0, 100, 40, 0, {}},
     {"mutate", "Mutate", ParamSpec::Choice, 0, 1, 0, kMomentary, {"off", "go"}},
+    {"move", "Move", ParamSpec::Int, 0, 100, 0, 0, {}},
     };
     return t;
 }
