@@ -110,7 +110,8 @@ public:
         addProgram("Cart patch", {});
         for (int i = 0; i < kFavSlots; ++i) addProgram("--", {});
         dirty_ = new std::atomic<bool>[t.size()];
-        for (size_t i = 0; i < t.size(); ++i) dirty_[i].store(false);
+        hostAt_ = new std::atomic<long long>[t.size()];
+        for (size_t i = 0; i < t.size(); ++i) { dirty_[i].store(false); hostAt_[i].store(0); }
 
         // Carts, first match wins:
         //   <plugin folder>/dx7_carts  - a 1.x install upgraded in place (1.x keeps its carts there, next to the .so)
@@ -135,6 +136,7 @@ public:
         if (worker_.joinable()) worker_.join();
         if (inst_) v2_destroy_instance(inst_);
         delete[] dirty_;
+        delete[] hostAt_;
     }
 
     void prepare(double, int) override {}
@@ -168,7 +170,13 @@ public:
         // Momentary first: bank_slot_N / patch_slot_N are verbs that also show text (a tile with a name).
         if (s.flags & kMomentary) { if (plain < 0.5f) return; }
         else if (s.flags & kText) return;
+        hostAt_[index].store(nowMs(), std::memory_order_relaxed);
         dirty_[index].store(true, std::memory_order_release);
+    }
+
+    static long long nowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
     bool formatValue(int index, float plain, std::string& out) override
@@ -552,7 +560,7 @@ private:
         {
             if (!moveKeep_ && moveIdx_ >= 0) { store(moveIdx_, 0.0f); mv_.valid = false; }   // a patch loaded another way: no movement
             moveKeep_ = false;
-            syncFromEngine();
+            syncFromEngine(true);
             displayDirty_.store(true);   // the worker makes the host call, never the audio thread
         }
     }
@@ -580,14 +588,18 @@ private:
     }
 
     // Read every value param back from the engine without marking it dirty.
-    void syncFromEngine()
+    // fresh: skip values the host moved within the last 300 ms (an envelope handle still under the finger), so a read-back
+    // never pulls it away mid-drag.
+    void syncFromEngine(bool fresh = false)
     {
+        const long long now = nowMs();
         const auto& t = paramSpecs();
         char buf[64];
         for (size_t i = 0; i < t.size(); ++i)
         {
             const ParamSpec& s = t[i];
             if ((int)i == moveIdx_ || (s.flags & (kText | kMomentary))) continue;
+            if (fresh && now - hostAt_[i].load(std::memory_order_relaxed) < 300) continue;
             buf[0] = 0;
             if (v2_get_param(inst_, s.key, buf, sizeof(buf)) <= 0 || !buf[0]) continue;
             store((int)i, (float)atoi(buf));
@@ -851,6 +863,7 @@ private:
     void* inst_ = nullptr;
     std::string cartDir_;
     std::atomic<bool>* dirty_ = nullptr;
+    std::atomic<long long>* hostAt_ = nullptr;   // when the host last moved each parameter (ms)
     int presetCountdown_ = -1, presetTarget_ = 0;
     std::string pendingState_;
     EngineLock lock_;
