@@ -1,0 +1,11 @@
+[
+  {
+    "path": "dx7_carts",
+    "label": "DX7 carts (.syx)",
+    "description": "Your own DX7 cart files. Each .syx appears in the cart list on the CARTS page and on the LCD.",
+    "hint": "A single 32-voice bank is 4104 bytes; a ROM dump of several banks is any whole multiple of 4104 bytes. After uploading, tap RESCAN on the CARTS page.",
+    "rules": [
+      {"label": "DX7 32-voice bank / multi-bank cart", "ext": [".syx"], "size_min": 4104, "size_max": 1050624, "unverified": true, "note": "Looks like a cart; the plugin checks that the size is a whole number of 4104-byte banks."}
+    ]
+  }
+]
