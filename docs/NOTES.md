@@ -456,3 +456,29 @@ folder, which has no static-VST-parameter analogue).
   `algorithm_view` (DSP get/set = the 0-based algorithm). Its option names are `ALGO 1..32`, not `1..32`:
   `when=<param>:<n>` looks option *names* up before indices, so numeric names shift every picture by one.
 - vst.json needs `"art": "html"` (the layout uses `art_css`, `text`, dotmatrix); without it shadow_art fails on `htext`.
+
+## Bank list raised from 999 to 8,192 banks (2026-11-02; PR #15 author reports an MPC Live II check, the follow-up below was checked offline only)
+
+- A user's MPC Live II (MPC OS 3.9.1) had 4,508 `.syx` files in `dx7_carts` (4,513 banks counting multi-bank
+  files). `scan_syx_banks()` stopped at `MAX_SYX_BANKS` (999) in `readdir()` order, *before* sorting, so the BANKS
+  list showed an arbitrary 999 of them and the rest could not be reached.
+- `MAX_SYX_BANKS` is now 8,192 and `syx_bank_index`'s max 8,191. `syx_banks` is no longer an array inside the
+  instance: it is `calloc`'d once in `v2_create_instance()` and freed in `v2_destroy_instance()`. A block that size
+  is mapped lazily, so only the entries a scan fills cost memory, and it is never reallocated, so the rescan in
+  `get_param("syx_bank_list")` can't leave another reader with a freed pointer.
+- Measured on x86 (`/proc/self/statm` around `create()`): stock 999-entry array 1,052 KB with 30 banks and
+  1,092 KB with the 4,508 files (999 listed); this change 440 KB with 30 banks and 5,280 KB with 4,513 banks listed.
+- Checked offline (ASan/UBSan, leak check on) with the 4,508 files: 4,513 banks listed, the last one selectable,
+  a bank restored by name through `state`, notes render. UBSan reports the usual signed overflows in
+  `msfa/fm_op_kernel.cc` (the oscillator phase wraps on purpose), unrelated to this change.
+- The wrapper's `nudge_pct: 10` keeps one bank per Q-Link event or wheel click: a 1/128 move of 8,191 is about 64,
+  well under the 10% tick limit. Saved projects restore their bank by name first, so a larger list doesn't move them.
+
+### Follow-up hardening of the bank scan (2026-11-04, offline: ASan/UBSan, 9,000 synthetic carts)
+
+- `scan_syx_banks()` now collects and sorts the file names *before* applying the cap, so a folder over
+  `MAX_SYX_BANKS` lists the alphabetically first 8,192 banks every time, not an arbitrary `readdir()` subset. The log says when it truncates.
+- A rescan keeps the selected bank (matched by path + sub-index) instead of leaving `syx_bank_index` on whatever now sorts into that slot.
+- `get_param("syx_bank_list")` rescans only when the folder's mtime changed (a scan opens every file), and builds JSON that is
+  always valid and NUL-terminated: an entry is written only if it fits whole, and names are escaped. With ~4,500 banks the list is
+  ~180 KB, so a small caller buffer yields a truncated-but-valid list; the BANKS tab itself reads `bank_slot_*`, not this list.

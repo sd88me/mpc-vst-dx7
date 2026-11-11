@@ -2,132 +2,78 @@
 
 💬 Questions or feedback? Join the [Open MPC Discord](https://discord.gg/sRRysZSgu3).
 
-> **MPC OS.** From 1.0.6 the skin is written in the format **MPC OS 2.x** draws, which MPC OS 3.x reads too, so the catalog
-> labels this release "MPC OS 2.x + 3.x". That label is a check of the skin and library against MPC OS 2.15.1's own skins,
-> not a test of this release on a 2.x unit. This exact skin (the 2.x shape with the new BANKS page) had not been tried on
-> any device when 1.0.6 was released: the 2.x shape with 1.0.4's pages worked on a Force and on a 2.15.1 MPC Live, and
-> 1.0.5's BANKS page worked on a Force in the 3.x shape. Reports from 2.x and 3.x units are welcome; 1.0.5 is the
-> fallback (3.x only).
-> See [MPC OS 2.x vs 3.x](https://github.com/sd88me/mpc-vst-plugins#mpc-os-2x-vs-3x) in the main repo.
-
 **Dexed (DX7)** as a native VST2 instrument for Akai MPC OS standalone devices (MPC Live/One/X/Key,
-Force). It loads in MPC's built-in plugin host and has its own touchscreen skin with Q-Link support.
+Force). It loads in MPC's built-in plugin host and has its own DX7-style touchscreen skin with Q-Link support.
 
-Current release: **v1.0.6** — see [Releases](https://github.com/sd88me/mpc-vst-dx7/releases).
+Current release: **v2.0.0**, see [Releases](https://github.com/sd88me/mpc-vst-dx7/releases).
+2.0 is an update of 1.x: same plugin name and ID, so existing projects load, and your own carts in `dx7_carts` are kept.
 
 ## Screenshots
 
-<img width="640" height="400" alt="2026-09-29T100343483Z" src="https://github.com/user-attachments/assets/be0c4576-9921-4fca-894b-85747d8ebd08" /><img width="640" height="400" alt="2026-09-29T100347135Z" src="https://github.com/user-attachments/assets/bc4792a0-3c24-4faa-96d3-910613d4506f" /><img width="640" height="400" alt="2026-09-29T100358065Z" src="https://github.com/user-attachments/assets/71fb35f1-e361-4171-98be-2c9c179aad13" />
+(2.0 screenshots: see the release page.)
 
 ## Features
 
-- Yamaha DX7-style 6-operator FM synthesis (the Dexed/MSFA engine), with all 32 algorithms, feedback,
-  oscillator sync, the LFO (six waveforms, key sync) and the pitch envelope.
-- **GLOBAL page**: bank and patch steppers with live names along the top, then voice (preset, algorithm,
-  feedback, output, octave, transpose, oscillator sync), LFO and pitch envelope.
-- **OP1-6 pages**: one page per operator with level, coarse, fine, detune, velocity sensitivity, amp
-  mod sensitivity, rate scaling, RATIO/FIXED mode, key scaling (breakpoint, depths, curves), the
-  four-stage envelope and an **ON** switch that mutes the operator. A small diagram of the current
-  algorithm sits on every operator page.
-- **ALGORITHM page**: Dexed's own diagram for each of the 32 algorithms (drawn from Dexed's layout
-  table), following the algorithm and feedback knobs and the patch you load.
-- **BANKS page**: a paginated list of every `.syx` bank on the device and the 32 patches of the loaded
-  bank; tap a bank to load it, tap a patch to play it. Both lists number top to bottom (carts 1-11 down the left
-  column, then 12-22; patches 1-16, then 17-32), and the bank and patch each have a stepper with arrows. The page
-  follows the bank you select, so stepping with a Q-Link or the wheel never leaves the highlight off screen.
-- **`.syx` carts**: single 4104-byte banks or multi-bank ROM dumps (any size that is an exact multiple
-  of 4104 bytes). A set of factory banks is included in the release zip.
-- 16 Q-Links per page, following the page you are on. On the BANKS page they are bank, patch, page back and page
-  forward: a Q-Link turn or a wheel click moves one cart or one patch. The left and right key-scaling curves on the
-  operator pages take three Q-Link events per option, so a turn no longer races through the four curves.
-- Dark slate panel with the DX7's "DX Green" accent and a light-grey LCD-style readout for bank and
-  patch names.
+- Yamaha DX7-style 6-operator FM synthesis (the Dexed/MSFA engine): all 32 algorithms, feedback, oscillator sync, the LFO
+  (six waveforms, key sync) and the pitch envelope.
+- **A new skin drawn like the DX7 panel**: DEXED wordmark, red LED patch number, an LCD with the cart and patch side by side.
+  Horizontal sliders with a lit fill, Q-Link bounds in blocks of four on every page.
+- **VOICE**: output, algorithm, feedback, transpose, octave, oscillator sync, the LFO and an interactive pitch envelope.
+- **CARTS**: every `.syx` cart on the device (paged tiles, the current one lit), the 32 patches of the loaded cart, a RANDOM
+  button (random cart and patch), and a **favourites** row.
+- **Favourites in the PRESET menu**: +FAV saves the current voice (with your edits); the saved voices appear in MPC's own
+  PRESET list, so you can pick them from the track or from a pad. -FAV removes the one you are on. Stored in `favourites.dat`
+  in the plugin folder.
+- **ALGO**: the algorithm diagram, the VOICE controls, an operator mixer (ON and level per operator) and **GENERATE**.
+- **GENERATE**: a random voice with musical rules. Pick a STYLE (PLUCK, BELL, PAD, BASS, EP, LEAD, ALL, CHAOS) and press
+  GENERATE for a new voice, or MUTATE to vary the current one by the AMOUNT slider. Carrier ratios (the key note) are kept,
+  carriers always fade to silence on release; CHAOS follows no rules for happy accidents. Generated patches are named GEN nnnn.
+- **OP**: one key with six sub-tabs, one per operator: level, coarse, fine, detune, velocity sensitivity, amp mod, rate
+  scaling, RATIO/FIXED, key scaling, a live draggable EG graph and the operator's ON switch.
+- The cart and patch on the LCD step with the Q-Links and the data wheel.
+- `.syx` carts: single 4104-byte banks or multi-bank ROM dumps (any exact multiple of 4104 bytes); a set of factory banks is included.
 
 ## Requirements
 
-- A first-generation MPC OS standalone device (32-bit ARM: Force, MPC Live / Live II, One, X, Key 61).
-  Tested on a Force.
-- Root SSH access to the device. Installing plugins this way is unofficial: back up first, use at your
-  own risk.
+- An MPC OS standalone device (Force, MPC Live / Live II / III, One, X, Key 61). Tested on a Force.
+- Root SSH access to the device for the installer. Installing plugins this way is unofficial: back up first, use at your own risk.
 
 ## Install
 
-1. Download `Dexed-DX7-1.0.0-mpc-armv7.zip` from the [latest release](https://github.com/sd88me/mpc-vst-dx7/releases/latest)
-   and unzip it.
+1. Download the zip for your device from the [latest release](https://github.com/sd88me/mpc-vst-dx7/releases/latest)
+   (`Dexed-DX7-2.0.0-mpc-armv7.zip` for the Force, Live, One, X and Key; `-aarch64` for the newer Gen 2 units) and unzip it.
 2. Copy the folder to the device and run the installer (it stops MPC, so save your project first):
 
    ```
-   scp -r Dexed-DX7-1.0.0 root@<device-ip>:/tmp/
-   ssh root@<device-ip> sh /tmp/Dexed-DX7-1.0.0/install.sh
+   scp -r Dexed-DX7-2.0.0 root@<device-ip>:/tmp/
+   ssh root@<device-ip> sh /tmp/Dexed-DX7-2.0.0/install.sh
    ```
 
 3. Add **Dexed (DX7)** to a track from the plugin browser (Instrument plugins).
 
-The zip's `INSTALL.md` has the manual steps and the uninstall command. Running the installer again
-upgrades in place. After replacing the plugin file on a running device, remove and re-insert the plugin
-on any track that uses it. If you had 0.4.0 (called "DX7 (Dexed)"), the old skin folder
-`/sdcard/Synths/sd88me - VST - DX7 (Dexed)` is left behind and can be deleted.
+The zip's `INSTALL.md` has the manual steps and the uninstall command. Running the installer again upgrades in place, keeping
+your own carts and favourites. After replacing the plugin file on a running device, remove and re-insert the plugin on any
+track that uses it.
 
 ### Bank and patch carts
 
 The plugin reads `.syx` files from the `dx7_carts` folder inside its own plugin folder
-(`/sdcard/Synths/sd88me - VST - Dexed (DX7)/dx7_carts`). The installer puts the factory banks there; drop your own files in the same folder and they appear in the bank stepper on the
-GLOBAL page and in the BANKS page's list.
+(`/sdcard/Synths/sd88me - VST - Dexed (DX7)/dx7_carts`). The installer puts the factory banks there; drop your own files in the
+same folder and they appear in the cart list on the CARTS page and on the LCD.
 
 ## Build from source
 
-Needs a sibling checkout of [mpc-vst-plugins](https://github.com/sd88me/mpc-vst-plugins) (the shared
-wrapper, `build_port.sh`, skin tooling) at `../mpc-vst-plugins`, or set `MPC_VST` to point at one.
-Docker (with QEMU for arm32v7) is needed by its build pipeline.
+`./build-sdk.sh test` builds the plugin and runs its host test; the skin is generated from Python (`tools/make_tui.py`,
+`tools/skin_pages.py`, `tools/make_dx7_skin.py`). `release.sh`-style packaging for the installer zips is described in
+`mpc-vst-plugins`' `docs/RELEASING.md`. The 32 algorithm diagrams in `images/` come from `tools/gen_algo_svgs.py`.
 
-```
-./build.sh
-```
-
-Output in `build/`: `dx7_dexed.so`, the skin folder, and `pluginlist-entry.xml`. No third-party source is
-fetched at build time. To put a build on a device, package it and use the installer (the plugin is one folder in
-`/sdcard/Synths`, so there is nothing to copy by hand):
-
-```
-./release.sh <version>      # dist/Dexed-DX7-<version>-mpc-armv7.zip, then install it as described above
-```
-
-A skin-only change needs no MPC restart: re-insert the plugin or reload the project. Registering the
-plugin in `MPC.settings` and the rest of the device workflow are in `mpc-vst-plugins`'
-`docs/PORTING.md` and `.claude/skills/mpc-vst-plugin/SKILL.md`.
-
-The skin fonts `EurostileExtendedBlack.ttf`, `Helvetica.ttf` and `FilmotypeFord.ttf` (used for the DEXED
-logo text and `skin.css`) are not in the repo. Put your own copies in `fonts/` and next to `skin.css`,
-or change the `text` line in `layout.conf`, before building the skin.
-
-To package a release zip: `./release.sh <version> [device-ip]` (see `mpc-vst-plugins`' `docs/RELEASING.md`).
-The 32 algorithm diagrams in `images/` are generated by `tools/gen_algo_svgs.py`.
+The skin art is drawn by the tools from code; the fonts in the art are open-licence (Roboto Condensed).
 
 ## Status
 
-v1.0.6 (the skin in the MPC OS 2.x shape; the library is the same as 1.0.5). Builds clean for armhf (needs glibc 2.29) and runs on a real Force: audio, bank and patch loading, live names,
-the operator switches, the algorithm diagrams and Q-Link control are checked on that hardware. New in 1.0.5, tried
-by hand on a Force (2026-10-05): Q-Links and steppers for bank and patch on the BANKS page, one cart per Q-Link
-turn or wheel click (the bank index spans 0-998, which made a turn skip eight to ten carts before), the lists
-numbering top to bottom, and three Q-Link events per option on the key-scaling curves. The 1.0.5 package was labelled MPC OS 3.x only (its skin was in the 3.x format); 1.0.6 passes the
-catalog check as MPC OS 2.x + 3.x.
-
-**CPU (Force, `tools/bench.sh`, 2026-10-05).** Worst block 5.4% of the audio budget and worst p99 4.0% (PASS):
-
-| State | mean | p99 |
-|---|---|---|
-| 1 voice | 0.7% | 2.4% |
-| 8 voices | 1.2% | 3.0% |
-| 16 voices | 1.7% | 3.5% |
-| Q-Link sweep | 1.2% | 4.0% |
-
-The synthesis runs in the audio callback, so unlike some other ports this bench measures all of it. The 1.0.0 bench
-(2026-09-29) read higher (worst block 15.7%); the bench tool and the load on the device have changed since, so do not
-read the difference as a speed-up from this release.
-
-The x86 host test (`tools/test_port.sh`) has four failing checks, all from one cause: the test machine has no
-`dx7_carts` folder to load presets from, so "set preset" and the `preset` stepping checks that follow from it fail.
-They fail the same way on 1.0.4.
+v2.0.0. Checked on a real Force: installing over 1.x with the installer, the plugin loads from the plugin browser and its pages
+draw. The author also ran this build on an MPC Live III. The host test (`./build-sdk.sh test`) passes. Not yet checked: loading a
+project saved with 1.x (the parameter order is unchanged on purpose, so it should load; reports welcome).
 
 ## Background
 

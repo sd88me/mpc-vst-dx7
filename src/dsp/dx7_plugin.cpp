@@ -13,6 +13,11 @@
 #include <math.h>
 #include <memory>
 #include <dirent.h>
+#include <sys/stat.h>
+#include <atomic>
+#include <string>
+#include <vector>
+#include <algorithm>
 
 /* Include plugin API */
 extern "C" {
@@ -70,7 +75,12 @@ typedef struct plugin_api_v2 {
 #define DX7_PATCH_SIZE 156   /* Size of unpacked DX7 voice data */
 #define DX7_PACKED_SIZE 128  /* Size of packed DX7 voice in .syx */
 #define MAX_PATCHES 128
-#define MAX_SYX_BANKS 999
+/* Bank list capacity. The list is allocated once per instance with calloc (see v2_create_instance()):
+ * a block this size is mapped lazily, so only the entries a scan fills take memory (~644 bytes per bank),
+ * and it never moves, so a rescan from get_param("syx_bank_list") can't leave a reader with a freed pointer.
+ * 999 hid most banks on devices with a large cart collection (4,500+ banks seen). Keep the "syx_bank_index"
+ * max in module.json at MAX_SYX_BANKS - 1. */
+#define MAX_SYX_BANKS 8192
 #define BANK_LIST_SLOTS 22   /* BANKS tab left list: cols=2 rows=11, same tile grid as jv880 */
 #define PATCH_LIST_SLOTS 32  /* BANKS tab right list: one syx bank's full 32 voices, no paging */
 
@@ -176,6 +186,17 @@ static void unpack_patch(const uint8_t *packed, uint8_t *unpacked) {
  * PLUGIN API V2 - INSTANCE-BASED (for multi-instance support)
  * ======================================================================== */
 
+/* A bank file read ahead of time by the plugin front end's worker thread, so the audio thread never does file I/O
+ * when a bank is selected: v2_load_syx() takes the bytes from here when path and sub-index match, else it reads the
+ * file itself (as 1.x always did). state: 0 empty, 1 being filled, 2 ready, 3 being consumed. */
+#define DX7_BANK_FILE_SIZE 4104  /* one standard 32-voice DX7 bank: F0 43 00 09 20 00 + 32*128 + F7 */
+struct bank_prefetch_t {
+    std::atomic<int> state;
+    char path[600];
+    int sub;
+    uint8_t data[DX7_BANK_FILE_SIZE];
+};
+
 /* v2 instance structure */
 typedef struct {
     /* Module path */
@@ -191,8 +212,10 @@ typedef struct {
     int output_level;
 
     /* Bank management */
-    syx_bank_entry_t syx_banks[MAX_SYX_BANKS];
+    syx_bank_entry_t *syx_banks;   /* MAX_SYX_BANKS entries, calloc'd in v2_create_instance() */
+    bank_prefetch_t *prefetch;     /* a bank file read ahead on a worker thread (see v2_load_syx) */
     int syx_bank_count;
+    time_t bank_dir_mtime;   /* folder mtime at the last scan: syx_bank_list rescans only when it changes */
     int syx_bank_index;
     int bank_page;      /* BANKS tab: which page of the bank list is showing (22 tiles/page) */
 
@@ -313,21 +336,15 @@ static void v2_init_default_patch(dx7_instance_t *inst) {
 }
 
 /* v2: Load syx file into instance */
-#define DX7_BANK_FILE_SIZE 4104  /* one standard 32-voice DX7 bank: F0 43 00 09 20 00 + 32*128 + F7 */
-
 /* Loads the 4104-byte bank at byte offset (sub_index * DX7_BANK_FILE_SIZE) within `path`.
  * A plain single-bank .syx (4104 bytes) is sub_index 0 of a 1-bank file; a multi-bank "ROM"
  * dump (N*4104 bytes, all banks concatenated back-to-back with no extra header/padding
  * between them -- the standard DX7 cartridge-dump convention) is sub_index 0..N-1. Callers
  * are expected to have already validated sub_index against the file's own bank count (see
  * scan_syx_banks()); this still re-checks defensively rather than trusting the caller. */
-static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
+/* Read and check one bank (4104 bytes) from `path`. Pure file I/O: touches no instance state, so it is safe on any thread. */
+static int syx_read_bank(const char *path, int sub_index, uint8_t *data) {
     char msg[256];
-
-    if (sub_index < 0) {
-        plugin_log("v2_load_syx: negative sub_index");
-        return -1;
-    }
 
     FILE *f = fopen(path, "rb");
     if (!f) {
@@ -338,18 +355,11 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
 
     long offset = (long)sub_index * DX7_BANK_FILE_SIZE;
     if (size < offset + DX7_BANK_FILE_SIZE) {
         snprintf(msg, sizeof(msg), "syx bank %d out of range: %s is %ld bytes", sub_index, path, size);
         plugin_log(msg);
-        fclose(f);
-        return -1;
-    }
-
-    uint8_t *data = (uint8_t *)malloc(DX7_BANK_FILE_SIZE);
-    if (!data) {
         fclose(f);
         return -1;
     }
@@ -360,7 +370,6 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
     if (got != DX7_BANK_FILE_SIZE) {
         snprintf(msg, sizeof(msg), "Short read on syx bank %d: %s", sub_index, path);
         plugin_log(msg);
-        free(data);
         return -1;
     }
 
@@ -368,9 +377,49 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
     if (data[0] != 0xF0 || data[1] != 0x43 || data[3] != 0x09) {
         snprintf(msg, sizeof(msg), "Invalid DX7 sysex header at bank %d of %s", sub_index, path);
         plugin_log(msg);
-        free(data);
         return -1;
     }
+    return 0;
+}
+
+/* Worker-thread entry: read a bank into the prefetch slot ahead of the load. Touches only the slot. */
+static void dx7_prefetch_bank(dx7_instance_t *inst, const char *path, int sub_index) {
+    bank_prefetch_t *pf = inst ? inst->prefetch : NULL;
+    if (!pf) return;
+    int expect = 0;
+    if (!pf->state.compare_exchange_strong(expect, 1)) {
+        expect = 2;   /* a stale ready bank: replace it */
+        if (!pf->state.compare_exchange_strong(expect, 1)) return;   /* being consumed right now */
+    }
+    snprintf(pf->path, sizeof(pf->path), "%s", path);
+    pf->sub = sub_index;
+    pf->state.store(syx_read_bank(path, sub_index, pf->data) == 0 ? 2 : 0, std::memory_order_release);
+}
+
+static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
+    char msg[256];
+
+    if (sub_index < 0) {
+        plugin_log("v2_load_syx: negative sub_index");
+        return -1;
+    }
+
+    uint8_t data[DX7_BANK_FILE_SIZE];
+    bool have = false;
+    if (inst->prefetch) {   /* read ahead by the worker thread? then no file I/O here */
+        bank_prefetch_t *pf = inst->prefetch;
+        int expect = 2;
+        if (pf->state.compare_exchange_strong(expect, 3, std::memory_order_acquire)) {
+            if (pf->sub == sub_index && strcmp(pf->path, path) == 0) {
+                memcpy(data, pf->data, DX7_BANK_FILE_SIZE);
+                have = true;
+                pf->state.store(0, std::memory_order_release);
+            } else {
+                pf->state.store(2, std::memory_order_release);   /* another bank's data: leave it */
+            }
+        }
+    }
+    if (!have && syx_read_bank(path, sub_index, data) != 0) return -1;
 
     /* Extract 32 patches starting at offset 6 */
     inst->preset_count = 32;
@@ -386,7 +435,6 @@ static int v2_load_syx(dx7_instance_t *inst, const char *path, int sub_index) {
         inst->patch_names[i][10] = '\0';
     }
 
-    free(data);
     strncpy(inst->patch_path, path, sizeof(inst->patch_path) - 1);
 
     snprintf(msg, sizeof(msg), "Loaded 32 patches from: %s (bank %d)", path, sub_index);
@@ -409,23 +457,47 @@ static void scan_syx_banks(dx7_instance_t *inst) {
     char dir_path[512];
     snprintf(dir_path, sizeof(dir_path), "%s", inst->module_dir);
 
+    /* Remember the selected bank so a rescan (files added/removed) keeps the same bank selected
+     * instead of leaving syx_bank_index pointing at whatever now sorts into that slot. */
+    char keep_path[600] = "";
+    int keep_sub = -1;
+    if (inst->syx_banks && inst->syx_bank_index >= 0 && inst->syx_bank_index < inst->syx_bank_count) {
+        snprintf(keep_path, sizeof(keep_path), "%s", inst->syx_banks[inst->syx_bank_index].path);
+        keep_sub = inst->syx_banks[inst->syx_bank_index].sub_index;
+    }
+
     inst->syx_bank_count = 0;
+    if (!inst->syx_banks) return;
+
+    struct stat dst;
+    inst->bank_dir_mtime = (stat(dir_path, &dst) == 0) ? dst.st_mtime : 0;
 
     DIR *dir = opendir(dir_path);
     if (!dir) return;
 
+    /* Collect and sort the file names first. readdir() order is arbitrary, so capping while reading
+     * would keep an arbitrary subset of a very large folder; capping the sorted list keeps the
+     * alphabetically first MAX_SYX_BANKS banks, the same ones every time. */
+    std::vector<std::string> names;
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
         const char *ext = strrchr(entry->d_name, '.');
         if (!ext || strcasecmp(ext, ".syx") != 0) continue;
-        if (inst->syx_bank_count >= MAX_SYX_BANKS) {
-            plugin_log("syx bank list full, skipping extras");
-            break;
-        }
+        names.push_back(entry->d_name);
+    }
+    closedir(dir);
+    std::sort(names.begin(), names.end(), [](const std::string &x, const std::string &y) {
+        return strcasecmp(x.c_str(), y.c_str()) < 0;
+    });
+
+    bool overflow = false;
+    for (size_t ni = 0; ni < names.size(); ni++) {
+        const char *fname = names[ni].c_str();
+        if (inst->syx_bank_count >= MAX_SYX_BANKS) { overflow = true; break; }
 
         char full_path[600];
-        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, entry->d_name);
+        snprintf(full_path, sizeof(full_path), "%s/%s", dir_path, fname);
 
         /* Size the file to find out how many back-to-back 4104-byte banks it holds -- a
          * plain single bank (n=1) or a "ROM" cart dump with several banks concatenated with
@@ -440,7 +512,7 @@ static void scan_syx_banks(dx7_instance_t *inst) {
         if (fsize <= 0 || fsize % DX7_BANK_FILE_SIZE != 0) {
             char skipmsg[600];
             snprintf(skipmsg, sizeof(skipmsg), "Skipping %s: %ld bytes, not a multiple of %d",
-                     entry->d_name, fsize, DX7_BANK_FILE_SIZE);
+                     fname, fsize, DX7_BANK_FILE_SIZE);
             plugin_log(skipmsg);
             continue;
         }
@@ -455,7 +527,7 @@ static void scan_syx_banks(dx7_instance_t *inst) {
              * single-bank-only display convention), plus a "[k/n]" suffix disambiguating
              * each logical bank when a file holds more than one (a "ROM" cart dump). */
             char base[128];
-            strncpy(base, entry->d_name, sizeof(base) - 1);
+            strncpy(base, fname, sizeof(base) - 1);
             base[sizeof(base) - 1] = '\0';
             char *ext = strrchr(base, '.');
             if (ext && (strcasecmp(ext, ".syx") == 0)) *ext = '\0';
@@ -466,17 +538,25 @@ static void scan_syx_banks(dx7_instance_t *inst) {
                 bank->name[sizeof(bank->name) - 1] = '\0';
             }
         }
-        if (inst->syx_bank_count >= MAX_SYX_BANKS) {
-            plugin_log("syx bank list full, skipping extras");
-            break;
-        }
     }
-
-    closedir(dir);
+    if (overflow || inst->syx_bank_count >= MAX_SYX_BANKS) {
+        char fm[128];
+        snprintf(fm, sizeof(fm), "syx bank list full (%d): later files in the folder are not listed", MAX_SYX_BANKS);
+        plugin_log(fm);
+    }
 
     /* Sort alphabetically */
     if (inst->syx_bank_count > 1) {
         qsort(inst->syx_banks, inst->syx_bank_count, sizeof(syx_bank_entry_t), bank_entry_cmp);
+    }
+
+    if (keep_sub >= 0) {
+        int found = -1;
+        for (int i = 0; i < inst->syx_bank_count; i++) {
+            if (inst->syx_banks[i].sub_index == keep_sub && strcmp(inst->syx_banks[i].path, keep_path) == 0) { found = i; break; }
+        }
+        if (found >= 0) inst->syx_bank_index = found;
+        else if (inst->syx_bank_index >= inst->syx_bank_count) inst->syx_bank_index = 0;
     }
 
     char msg[128];
@@ -717,8 +797,12 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
 
     /* Initialize bank management */
     inst->syx_bank_count = 0;
+    inst->bank_dir_mtime = 0;
     inst->syx_bank_index = 0;
-    memset(inst->syx_banks, 0, sizeof(inst->syx_banks));
+    inst->syx_banks = (syx_bank_entry_t *)calloc(MAX_SYX_BANKS, sizeof(syx_bank_entry_t));
+    if (!inst->syx_banks) plugin_log("no memory for the bank list: banks disabled");
+    inst->prefetch = new bank_prefetch_t();
+    inst->prefetch->state.store(0);
 
     /* Initialize DX7 parameters to defaults */
     inst->algorithm = 0;
@@ -887,6 +971,8 @@ static void v2_destroy_instance(void *instance) {
         }
     }
 
+    free(inst->syx_banks);
+    delete inst->prefetch;
     plugin_log("Instance destroyed");
     delete inst;
 }
@@ -1036,6 +1122,34 @@ static int find_bank_by_name(dx7_instance_t *inst, const char *name) {
         }
     }
     return -1;
+}
+
+/* Which bank file would this verb (or a saved "state") load? Pure arithmetic over the bank list (no file I/O, no engine
+ * writes), so the plugin front end can have the worker thread read that file before the audio thread applies the verb.
+ * Same index rules as set_syx_bank_index(). Returns 0 and fills path/sub, or -1 if the verb loads no bank. */
+static int dx7_bank_target(dx7_instance_t *inst, const char *key, const char *val, char *path, size_t path_len, int *sub) {
+    if (!inst || !inst->syx_banks || inst->syx_bank_count <= 0) return -1;
+    int n = inst->syx_bank_count, idx;
+    if (!strcmp(key, "syx_bank_index")) idx = atoi(val);
+    else if (!strcmp(key, "next_syx_bank")) idx = inst->syx_bank_index + 1;
+    else if (!strcmp(key, "prev_syx_bank")) idx = inst->syx_bank_index - 1;
+    else if (!strncmp(key, "bank_slot_", 10)) {
+        int slot = atoi(key + 10) - 1;
+        idx = inst->bank_page * BANK_LIST_SLOTS + slot;
+        if (slot < 0 || slot >= BANK_LIST_SLOTS || idx >= n) return -1;
+    } else if (!strcmp(key, "state")) {
+        float fval;
+        char bank_name[128];
+        idx = -1;
+        if (json_get_string(val, "syx_bank_name", bank_name, sizeof(bank_name)) > 0) idx = find_bank_by_name(inst, bank_name);
+        if (idx < 0 && json_get_number(val, "syx_bank_index", &fval) == 0) idx = (int)fval;
+        if (idx < 0 || idx >= n) return -1;
+    } else return -1;
+    if (idx < 0) idx = n - 1;
+    if (idx >= n) idx = 0;
+    snprintf(path, path_len, "%s", inst->syx_banks[idx].path);
+    *sub = inst->syx_banks[idx].sub_index;
+    return 0;
 }
 
 /* v2: Set parameter */
@@ -1758,15 +1872,34 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     /* Bank list for Shadow UI menu */
     if (strcmp(key, "syx_bank_list") == 0) {
-        scan_syx_banks(inst);  /* Rescan each time to pick up new banks */
-        int written = snprintf(buf, buf_len, "[");
-        for (int i = 0; i < inst->syx_bank_count && written < buf_len - 50; i++) {
-            if (i > 0) written += snprintf(buf + written, buf_len - written, ",");
-            written += snprintf(buf + written, buf_len - written,
-                "{\"label\":\"%s\",\"index\":%d}", inst->syx_banks[i].name, i);
+        /* Rescan only when the folder changed (or nothing is loaded yet): a rescan opens every file. */
+        struct stat dst;
+        time_t mt = (stat(inst->module_dir, &dst) == 0) ? dst.st_mtime : 0;
+        if (inst->syx_bank_count == 0 || mt != inst->bank_dir_mtime) scan_syx_banks(inst);
+        /* Build a JSON array that is always valid and NUL-terminated, however many banks there are: an
+         * entry is written only if it fits whole (with the closing bracket), and names are escaped. */
+        if (buf_len < 3) return 0;
+        size_t cap = (size_t)buf_len, w = 0;
+        buf[w++] = '[';
+        for (int i = 0; i < inst->syx_bank_count; i++) {
+            char item[512];
+            char esc[300];
+            size_t e = 0;
+            for (const char *c = inst->syx_banks[i].name; *c && e + 7 < sizeof(esc); c++) {
+                unsigned char ch = (unsigned char)*c;
+                if (ch == '"' || ch == '\\') { esc[e++] = '\\'; esc[e++] = (char)ch; }
+                else if (ch < 0x20) { e += (size_t)snprintf(esc + e, sizeof(esc) - e, "\\u%04x", ch); }
+                else esc[e++] = (char)ch;
+            }
+            esc[e] = '\0';
+            int n = snprintf(item, sizeof(item), "%s{\"label\":\"%s\",\"index\":%d}", i ? "," : "", esc, i);
+            if (n < 0 || w + (size_t)n + 2 > cap) break;   /* +2: ']' and NUL */
+            memcpy(buf + w, item, (size_t)n);
+            w += (size_t)n;
         }
-        written += snprintf(buf + written, buf_len - written, "]");
-        return written;
+        buf[w++] = ']';
+        buf[w] = '\0';
+        return (int)w;
     }
     if (strcmp(key, "syx_bank_index") == 0) {
         return snprintf(buf, buf_len, "%d", inst->syx_bank_index);
@@ -1807,6 +1940,10 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         if (slot < 0 || slot >= PATCH_LIST_SLOTS || slot >= inst->preset_count)
             return snprintf(buf, buf_len, "");
         return snprintf(buf, buf_len, "%s", inst->patch_names[slot]);
+    }
+    if (strcmp(key, "bank_cur_slot") == 0) {   /* which tile of the showing CARTS page is the loaded cart (22 = none) */
+        int slot = inst->syx_bank_index - inst->bank_page * BANK_LIST_SLOTS;
+        return snprintf(buf, buf_len, "%d", (slot >= 0 && slot < BANK_LIST_SLOTS) ? slot : BANK_LIST_SLOTS);
     }
     if (strcmp(key, "bank_page_text") == 0) {
         int pages = (inst->syx_bank_count + BANK_LIST_SLOTS - 1) / BANK_LIST_SLOTS;
