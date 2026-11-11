@@ -232,34 +232,36 @@ public:
         if (!inst_) return;
         applyParamChanges(ctx.numFrames);
 
+        // The engine only renders whole N-sample (64) blocks: asked for fewer, it still advances every voice by N and
+        // drops the rest, so a partial block is a jump in the waveform (a click). 1.x always rendered 128-frame blocks.
+        // So render N at a time into pcm_ and hand it out across host blocks; MIDI lands on the next N boundary (<1.5 ms).
         float* outL = ctx.outputs[0];
         float* outR = ctx.numOutputs > 1 ? ctx.outputs[1] : nullptr;
-        int frame = 0, mi = 0;
-        while (frame < ctx.numFrames)
+        int mi = 0;
+        for (int frame = 0; frame < ctx.numFrames; ++frame)
         {
-            while (mi < ctx.numMidiEvents && ctx.midi[mi].sampleOffset <= frame)
+            if (pcmPos_ >= N)
             {
-                const mpc::MidiEvent& e = ctx.midi[mi++];
-                v2_on_midi(inst_, e.data, e.size, MOVE_MIDI_SOURCE_EXTERNAL);
-            }
-            int end = ctx.numFrames;
-            if (mi < ctx.numMidiEvents) end = mpc::clamp(ctx.midi[mi].sampleOffset, frame + 1, ctx.numFrames);
-            while (frame < end)
-            {
-                int n = std::min(end - frame, kChunk);
-                v2_render_block(inst_, pcm_, n);
-                for (int i = 0; i < n; ++i)
+                while (mi < ctx.numMidiEvents && ctx.midi[mi].sampleOffset <= frame)
                 {
-                    outL[frame + i] = pcm_[2 * i] * (1.0f / 32768.0f);
-                    if (outR) outR[frame + i] = pcm_[2 * i + 1] * (1.0f / 32768.0f);
+                    const mpc::MidiEvent& e = ctx.midi[mi++];
+                    v2_on_midi(inst_, e.data, e.size, MOVE_MIDI_SOURCE_EXTERNAL);
                 }
-                frame += n;
+                v2_render_block(inst_, pcm_, N);
+                pcmPos_ = 0;
             }
+            outL[frame] = pcm_[2 * pcmPos_] * (1.0f / 32768.0f);
+            if (outR) outR[frame] = pcm_[2 * pcmPos_ + 1] * (1.0f / 32768.0f);
+            ++pcmPos_;
+        }
+        while (mi < ctx.numMidiEvents)   // events not yet due at a block boundary: apply now, heard from the next block
+        {
+            const mpc::MidiEvent& e = ctx.midi[mi++];
+            v2_on_midi(inst_, e.data, e.size, MOVE_MIDI_SOURCE_EXTERNAL);
         }
     }
 
 private:
-    static constexpr int kChunk = 256;
     static constexpr int kFavSlots = 64;
     // The bank index param spans 0..8191, but the cart list is far shorter. A Q-Link or data-wheel tick moves it ~64 (1/128) and a
     // finger drag by thousands, so an absolute reading would skip carts or run past the end. Every host-driven change is therefore
@@ -867,7 +869,8 @@ private:
     int presetCountdown_ = -1, presetTarget_ = 0;
     std::string pendingState_;
     EngineLock lock_;
-    int16_t pcm_[kChunk * 2];
+    int16_t pcm_[N * 2] = {};
+    int pcmPos_ = N;   // next unread frame of pcm_ (N = empty)
 };
 
 MPC_PLUGIN_ENTRY(DexedPlugin)
