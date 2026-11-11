@@ -10,7 +10,21 @@ Current release: **v2.0.0**, see [Releases](https://github.com/sd88me/mpc-vst-dx
 
 ## Screenshots
 
-(2.0 screenshots: see the release page.)
+VOICE: the LCD with the cart and patch, the voice controls, the LFO and the pitch envelope.
+
+![VOICE page](docs/img/dexed-dx7.png)
+
+ALGO: the algorithm diagram, an operator mixer and GENERATE.
+
+![ALGO page](docs/img/dexed-dx7-algo.png)
+
+OP1 to OP6 (one key, six sub-tabs): oscillator, sensitivity, keyboard level scaling and the operator's envelope.
+
+![OP page](docs/img/dexed-dx7-op1.png)
+
+CARTS: every cart on the device, the 32 patches of the loaded one, and favourites.
+
+![CARTS page](docs/img/dexed-dx7-carts.png)
 
 ## Features
 
