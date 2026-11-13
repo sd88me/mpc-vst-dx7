@@ -266,12 +266,22 @@ private:
     // The bank index param spans 0..8191, but the cart list is far shorter. A Q-Link or data-wheel tick moves it ~64 (1/128) and a
     // finger drag by thousands, so an absolute reading would skip carts or run past the end. Every host-driven change is therefore
     // RELATIVE: one cart per change, in the direction of the move (taps and tiles use the verbs, not this). The engine wraps past either end.
+    // The direction is the way the host's value moved, from where it was before (bankHost_) or from the engine's cart, whichever is
+    // the smaller move. While a Q-Link turns, the read-back waits 300 ms (syncFromEngine(true)), so the host's value runs ahead of the
+    // cart: judged against the cart alone, turning back stepped the wrong way until the host's value came back past it. After a
+    // read-back the next tick starts from the cart, or, on some controls, from the host's own old value: the smaller move tells which.
     int bankValue(int i)
     {
         int v = getInt(i);
         int cur = ((dx7_instance_t*)inst_)->syx_bank_index;
-        return v == cur ? cur : cur + (v > cur ? 1 : -1);
+        if (v == bankHost_ && bankResult_ >= 0) return bankResult_;   // the same move asked again (the file read, then the apply)
+        int dH = bankHost_ >= 0 ? v - bankHost_ : 0, dV = v - cur;
+        int d = (dH != 0 && (dV == 0 || std::abs(dH) < std::abs(dV))) ? dH : dV;
+        bankHost_ = v;
+        bankResult_ = d == 0 ? cur : cur + (d > 0 ? 1 : -1);
+        return bankResult_;
     }
+    int bankHost_ = -1, bankResult_ = -1;   // the host's last bank value and the cart it was sent to (audio thread)
 
     // ---- favourites: a whole voice (156-byte unpacked DX7 voice, with the user's edits) per slot ----------------
     struct Fav { bool used = false; uint8_t voice[DX7_PATCH_SIZE] = {}; char name[11] = {}; };
