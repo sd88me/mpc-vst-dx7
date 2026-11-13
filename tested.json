@@ -18,5 +18,12 @@
   "firmware": "MPC OS 3.9.1",
   "date": "2026-11-08",
   "note": "Installed over 1.x with the installer; the plugin loads and its pages draw. A project saved with 1.x was not tried."
+ },
+ {
+  "version": "2.0.3",
+  "device": "MPC Live III (Gen2)",
+  "firmware": "MPC OS 3.10.1",
+  "date": "2026-11-13",
+  "note": "Tested as the beta build of the same code (Dexed 2 Beta, own uid) from VST2 Plugins: data wheel on the cart, bursts up and down step one cart a click (+10/-7/+20 exact); very fast turns down can still drop a click or two. The release zips were not installed; the armv7 build was not tried."
  }
 ]
