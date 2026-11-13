@@ -110,6 +110,7 @@ public:
         addProgram("Cart patch", {});
         for (int i = 0; i < kFavSlots; ++i) addProgram("--", {});
         dirty_ = new std::atomic<bool>[t.size()];
+        for (size_t i = 0; i < t.size(); ++i) if (!strcmp(t[i].key, "syx_bank_index")) bankIdx_ = (int)i;
         hostAt_ = new std::atomic<long long>[t.size()];
         for (size_t i = 0; i < t.size(); ++i) { dirty_[i].store(false); hostAt_[i].store(0); }
 
@@ -171,6 +172,8 @@ public:
         if (s.flags & kMomentary) { if (plain < 0.5f) return; }
         else if (s.flags & kText) return;
         hostAt_[index].store(nowMs(), std::memory_order_relaxed);
+        if (index == bankIdx_ && bankPushing_.load()) return;   // the host echoing the cart the worker just gave it
+        if (index == bankIdx_ && inst_) bankMove((int)std::lround(plain));
         dirty_[index].store(true, std::memory_order_release);
     }
 
@@ -266,22 +269,38 @@ private:
     // The bank index param spans 0..8191, but the cart list is far shorter. A Q-Link or data-wheel tick moves it ~64 (1/128) and a
     // finger drag by thousands, so an absolute reading would skip carts or run past the end. Every host-driven change is therefore
     // RELATIVE: one cart per change, in the direction of the move (taps and tiles use the verbs, not this). The engine wraps past either end.
-    // The direction is the way the host's value moved, from where it was before (bankHost_) or from the engine's cart, whichever is
-    // the smaller move. While a Q-Link turns, the read-back waits 300 ms (syncFromEngine(true)), so the host's value runs ahead of the
-    // cart: judged against the cart alone, turning back stepped the wrong way until the host's value came back past it. After a
-    // read-back the next tick starts from the cart, or, on some controls, from the host's own old value: the smaller move tells which.
-    int bankValue(int i)
+    // Each host move is counted as one step in parameterChanged (bankMove), in the direction the host's value moved: from its
+    // previous value (bankHost_) or from the cart, whichever is the smaller move. While a control turns the read-back waits 300 ms,
+    // so the host's value runs ahead of the cart, and after a read-back some controls go on from their own old value: measured
+    // against the cart alone, turning back stepped the wrong way. Counting there, not here, also keeps every click: the audio thread
+    // sees one dirty flag per block, and several clicks in one block, or during a cart's file read, used to become one step.
+    // bankValue (audio thread) adds the counted steps to the cart being gone to (bankTarget_) and returns it; the engine's wrap rule.
+    int bankValue(bool take = true)   // take: add the counted steps (not when applying a cart whose file is already read)
     {
-        int v = getInt(i);
-        int cur = ((dx7_instance_t*)inst_)->syx_bank_index;
-        if (v == bankHost_ && bankResult_ >= 0) return bankResult_;   // the same move asked again (the file read, then the apply)
-        int dH = bankHost_ >= 0 ? v - bankHost_ : 0, dV = v - cur;
-        int d = (dH != 0 && (dV == 0 || std::abs(dH) < std::abs(dV))) ? dH : dV;
-        bankHost_ = v;
-        bankResult_ = d == 0 ? cur : cur + (d > 0 ? 1 : -1);
-        return bankResult_;
+        dx7_instance_t* d = (dx7_instance_t*)inst_;
+        const int n = d->syx_bank_count, cur = d->syx_bank_index;
+        if (n <= 0) return cur;
+        int t = bankTarget_.load();
+        if (t < 0) t = cur;
+        const int k = take ? bankSteps_.exchange(0) : 0;
+        if (k) t = ((t + k) % n + n) % n;
+        bankTarget_.store(t);
+        return t;
     }
-    int bankHost_ = -1, bankResult_ = -1;   // the host's last bank value and the cart it was sent to (audio thread)
+    void bankMove(int v)   // parameterChanged: one host move of the cart value
+    {
+        dx7_instance_t* d = (dx7_instance_t*)inst_;
+        const int h = bankHost_.exchange(v);
+        int c = bankTarget_.load();
+        if (c < 0) c = d->syx_bank_index;
+        const int dH = h >= 0 ? v - h : 0, dV = v - c;
+        const int m = (dH != 0 && (dV == 0 || std::abs(dH) < std::abs(dV))) ? dH : dV;
+        if (m) bankSteps_.fetch_add(m > 0 ? 1 : -1);
+        if (v <= (int)param(bankIdx_).min || v >= (int)param(bankIdx_).max) bankPin_.store(true);
+    }
+    std::atomic<int> bankHost_{-1}, bankTarget_{-1}, bankSteps_{0};   // host's last value, cart being gone to, steps not yet applied
+    int bankIdx_ = -1;
+    std::atomic<bool> bankPin_{false}, bankPushing_{false};
 
     // ---- favourites: a whole voice (156-byte unpacked DX7 voice, with the user's edits) per slot ----------------
     struct Fav { bool used = false; uint8_t voice[DX7_PATCH_SIZE] = {}; char name[11] = {}; };
@@ -421,7 +440,26 @@ private:
             }
             if (favDirty_.exchange(false)) writeFavourites();
             if (displayDirty_.exchange(false)) requestDisplayUpdate();
+            if (bankPin_.exchange(false)) pushBankToHost();
         }
+    }
+
+    // The cart value sits at the bottom of its 0..8191 range (it is the cart number), so a turn down soon pins the host's value at 0,
+    // and a pinned control sends nothing more: fast clicks down were lost. When a move lands on an end, the worker gives the host the
+    // cart being gone to straight away (no 300 ms hold), so the next click has room again.
+    void pushBankToHost()
+    {
+        dx7_instance_t* d = (dx7_instance_t*)inst_;
+        int t = bankTarget_.load();
+        if (t < 0) t = d->syx_bank_index;
+        t += bankSteps_.load();   // steps the audio thread has not taken yet
+        const int n = d->syx_bank_count;
+        if (n > 0) t = (t % n + n) % n;
+        bankHost_.store(t);
+        store(bankIdx_, (float)t);
+        bankPushing_.store(true);
+        notifyHostParameterChanged(bankIdx_);
+        bankPushing_.store(false);
     }
 
     std::thread worker_;
@@ -535,7 +573,7 @@ private:
             if (isBankVerb(s.key) && (int)i != prefetchedParam_)
             {   // queue the file read on the worker, apply when it is ready (the newest request replaces an older one)
                 if (s.flags & kMomentary) snprintf(val, sizeof(val), "1");
-                else snprintf(val, sizeof(val), "%d", !strcmp(s.key, "syx_bank_index") ? bankValue((int)i) : getInt((int)i));
+                else snprintf(val, sizeof(val), "%d", !strcmp(s.key, "syx_bank_index") ? bankValue() : getInt((int)i));
                 char path[600]; int sub;
                 if (dx7_bank_target((dx7_instance_t*)inst_, s.key, val, path, sizeof(path), &sub) == 0)
                 {
@@ -552,8 +590,12 @@ private:
             }
             else
             {
-                snprintf(val, sizeof(val), "%d", !strcmp(s.key, "syx_bank_index") ? bankValue((int)i) : getInt((int)i));
+                // the read cart, as it was asked for: steps counted since then set the param dirty again and start the next read
+                snprintf(val, sizeof(val), "%d", (int)i == bankIdx_ ? bankValue(false) : getInt((int)i));
                 v2_set_param(inst_, s.key, val);
+                if ((int)i == bankIdx_ && bankSteps_.load() == 0 &&
+                    bankTarget_.load() == ((dx7_instance_t*)inst_)->syx_bank_index)
+                    bankTarget_.store(-1);   // arrived: the next move starts from the cart again
             }
             if (changesPatch(s.key)) resync = true;
         }
@@ -579,6 +621,7 @@ private:
 
     void pushAllToEngine()
     {
+        bankTarget_.store(-1); bankSteps_.store(0); bankHost_.store(-1);   // a restored state: no turn in progress
         const auto& t = paramSpecs();
         char val[32];
         lock_.lock();
