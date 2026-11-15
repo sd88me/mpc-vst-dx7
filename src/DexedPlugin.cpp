@@ -278,7 +278,7 @@ private:
     static constexpr int kFavNameMax = 10;   // a DX7 voice name
     std::atomic<bool> kbOpen_{false}, kbDirty_{false};
     std::string kbName_;                     // favLock_: the name being typed
-    bool kbShift_ = false, kbFresh_ = false; // favLock_
+    bool kbShift_ = false;                   // favLock_
     uint8_t kbVoice_[DX7_PATCH_SIZE] = {};   // favLock_: the voice +FAV took
     int favNameIdx_ = -1, kbOpenIdx_ = -1, kbFirst_ = -1, nameCounter_ = 0;
     std::vector<long long> lastFire_;        // audio thread: when each local momentary last fired
@@ -378,7 +378,6 @@ private:
         kbName_.assign((const char*)d->current_patch + 145, 10);   // the DX7 voice name bytes
         while (!kbName_.empty() && (kbName_.back() == ' ' || kbName_.back() == 0)) kbName_.pop_back();
         kbShift_ = false;
-        kbFresh_ = true;   // the first character typed replaces the name (a full 10-character name would block every key)
         favLock_.unlock();
         kbOpen_.store(true);
         kbDirty_.store(true);
@@ -398,7 +397,6 @@ private:
         favLock_.lock();
         if (k <= nchars)   // a character or space
         {
-            if (kbFresh_) { kbName_.clear(); kbFresh_ = false; }
             if ((int)kbName_.size() < kFavNameMax)
             {
                 char c = k < nchars ? kKbChars[k] : ' ';
@@ -411,7 +409,7 @@ private:
                 kbName_ += c;
             }
         }
-        else if (k == nchars + 1) { kbFresh_ = false; if (!kbName_.empty()) kbName_.pop_back(); }
+        else if (k == nchars + 1) { if (!kbName_.empty()) kbName_.pop_back(); }
         else if (k == nchars + 2) kbShift_ = !kbShift_;
         favLock_.unlock();
         kbDirty_.store(true);
