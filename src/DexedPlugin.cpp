@@ -36,6 +36,7 @@
 #include <chrono>
 #include <random>
 #include <thread>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <sys/stat.h>
@@ -125,6 +126,10 @@ public:
         else cartDir_ = folder + "/Content/carts";
         favPath_ = folder + "/favourites.dat";
         moveIdx_ = findParam("move");
+        favNameIdx_ = findParam("fav_name");
+        kbOpenIdx_ = findParam("kb_open");
+        kbFirst_ = findParam("kb_1");
+        for (size_t i = 0; i < t.size(); ++i) lastFire_.push_back(0);
         loadFavourites();
         inst_ = v2_create_instance(cartDir_.c_str(), "{}");
         syncFromEngine();
@@ -168,6 +173,7 @@ public:
     void parameterChanged(int index, float plain) override
     {
         const ParamSpec& s = paramSpecs()[(size_t)index];
+        if ((s.flags & kLocal) && !(s.flags & kMomentary)) return;   // kb_open / fav_name: set by the plugin only
         // Momentary first: bank_slot_N / patch_slot_N are verbs that also show text (a tile with a name).
         if (s.flags & kMomentary) { if (plain < 0.5f) return; }
         else if (s.flags & kText) return;
@@ -194,6 +200,7 @@ public:
         }
         if (!(s.flags & kText) || !inst_) return false;
         (void)plain;
+        if (index == favNameIdx_) { favLock_.lock(); out = kbName_ + "_"; favLock_.unlock(); return true; }
         if (!strcmp(s.key, "fav_text"))
         {
             int n = 0;
@@ -224,6 +231,8 @@ public:
     void loadExtraState(const uint8_t* data, size_t size) override
     {
         pendingState_.assign(reinterpret_cast<const char*>(data), size);   // applied in reset(), on the audio thread
+        kbOpen_.store(false);
+        kbDirty_.store(true);   // a project saved with the keyboard open restored kb_open = 1: push it closed
         ignoreProgram_ = true;
         char path[600]; int sub;   // read the project's bank here on the UI thread, so reset() does no file I/O
         if (inst_ && dx7_bank_target((dx7_instance_t*)inst_, "state", pendingState_.c_str(), path, sizeof(path), &sub) == 0)
@@ -266,6 +275,13 @@ public:
 
 private:
     static constexpr int kFavSlots = 64;
+    static constexpr int kFavNameMax = 10;   // a DX7 voice name
+    std::atomic<bool> kbOpen_{false}, kbDirty_{false};
+    std::string kbName_;                     // favLock_: the name being typed
+    bool kbShift_ = false;                   // favLock_
+    uint8_t kbVoice_[DX7_PATCH_SIZE] = {};   // favLock_: the voice +FAV took
+    int favNameIdx_ = -1, kbOpenIdx_ = -1, kbFirst_ = -1, nameCounter_ = 0;
+    std::vector<long long> lastFire_;        // audio thread: when each local momentary last fired
     // The bank index param spans 0..8191, but the cart list is far shorter. A Q-Link or data-wheel tick moves it ~64 (1/128) and a
     // finger drag by thousands, so an absolute reading would skip carts or run past the end. Every host-driven change is therefore
     // RELATIVE: one cart per change, in the direction of the move (taps and tiles use the verbs, not this). The engine wraps past either end.
@@ -352,24 +368,73 @@ private:
         programs_[(size_t)i + 1].name = std::to_string(i + 1) + " " + nm;
     }
 
-    void saveFavourite()   // audio thread, engine lock held
+    // +FAV: the voice as it is now (with the user's edits) waits in kbVoice_ while its name is typed on the drawn keyboard.
+    void openKeyboard()   // audio thread, engine lock held
     {
         dx7_instance_t* d = (dx7_instance_t*)inst_;
         apply_patch_params(d);   // make sure current_patch holds the live edits
         favLock_.lock();
+        memcpy(kbVoice_, d->current_patch, DX7_PATCH_SIZE);
+        kbName_.assign((const char*)d->current_patch + 145, 10);   // the DX7 voice name bytes
+        while (!kbName_.empty() && (kbName_.back() == ' ' || kbName_.back() == 0)) kbName_.pop_back();
+        kbShift_ = false;
+        favLock_.unlock();
+        kbOpen_.store(true);
+        kbDirty_.store(true);
+    }
+
+    void closeKeyboard()
+    {
+        if (kbOpen_.exchange(false)) kbDirty_.store(true);
+    }
+
+    void keyboardKey(int k)   // audio thread; k = 0 .. 41: characters, then space, delete, shift, cancel, save
+    {
+        if (!kbOpen_.load()) return;
+        const int nchars = (int)sizeof kKbChars - 1;
+        if (k == nchars + 3) { closeKeyboard(); return; }   // CANCEL
+        if (k == nchars + 4) { saveTyped(); return; }       // SAVE
+        favLock_.lock();
+        if (k <= nchars)   // a character or space
+        {
+            if ((int)kbName_.size() < kFavNameMax)
+            {
+                char c = k < nchars ? kKbChars[k] : ' ';
+                const bool cap = kbName_.empty() || kbName_.back() == ' ';
+                if (c >= 'A' && c <= 'Z')
+                {
+                    if (cap == kbShift_) c = (char)(c - 'A' + 'a');   // capital at the start and after a space; SHIFT flips the next letter
+                    kbShift_ = false;
+                }
+                kbName_ += c;
+            }
+        }
+        else if (k == nchars + 1) { if (!kbName_.empty()) kbName_.pop_back(); }
+        else if (k == nchars + 2) kbShift_ = !kbShift_;
+        favLock_.unlock();
+        kbDirty_.store(true);
+    }
+
+    void saveTyped()   // audio thread
+    {
+        favLock_.lock();
+        std::string name = kbName_;
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        if (name.empty()) name = "Favourite";
         int slot = -1;
         for (int i = 0; i < kFavSlots && slot < 0; ++i) if (!favs_[i].used) slot = i;
         if (slot >= 0)
         {
             Fav& f = favs_[slot];
             f.used = true;
-            memcpy(f.voice, d->current_patch, DX7_PATCH_SIZE);
-            memcpy(f.name, d->current_patch + 145, 10);   // the DX7 voice name bytes
-            f.name[10] = 0;
+            memcpy(f.voice, kbVoice_, DX7_PATCH_SIZE);
+            memset(f.name, 0, sizeof f.name);
+            memcpy(f.name, name.c_str(), std::min(name.size(), (size_t)kFavNameMax));
             nameProgram(slot);
         }
         favLock_.unlock();
-        if (slot >= 0) favDirty_.store(true);
+        closeKeyboard();
+        if (slot >= 0) { favDirty_.store(true); displayDirty_.store(true); }
     }
 
     void deleteFavourite()  // deletes the favourite that is loaded now (picked from the PRESET menu)
@@ -439,6 +504,15 @@ private:
                 readySeq_.store(seq, std::memory_order_release);
             }
             if (favDirty_.exchange(false)) writeFavourites();
+            if (kbDirty_.exchange(false))   // the keyboard opened or closed, or the typed name changed
+            {
+                store(kbOpenIdx_, kbOpen_.load() ? 1.0f : 0.0f);
+                notifyHostParameterChanged(kbOpenIdx_);
+                nameCounter_ = (nameCounter_ + 1) % 1024;
+                store(favNameIdx_, (float)nameCounter_);
+                notifyHostParameterChanged(favNameIdx_);
+                displayDirty_.store(true);
+            }
             if (displayDirty_.exchange(false)) requestDisplayUpdate();
             if (bankPin_.exchange(false)) pushBankToHost();
         }
@@ -505,9 +579,24 @@ private:
                 presetCountdown_ = (int)(0.05 * sampleRate() / std::max(1, frames)) + 1;
                 continue;
             }
-            if (!strcmp(s.key, "fav_save") || !strcmp(s.key, "fav_delete"))
+            if (s.flags & kLocal)   // the naming keyboard's keys
             {
-                if (s.key[4] == 's') saveFavourite(); else deleteFavourite();
+                store((int)i, 0.0f);
+                const long long now = nowMs();
+                if (now - lastFire_[i] < 250) continue;   // the second report of one tap
+                lastFire_[i] = now;
+                keyboardKey((int)i - kbFirst_);
+                continue;
+            }
+            if (!strcmp(s.key, "fav_save"))
+            {   // +FAV: open the keyboard on the voice's name; the voice is taken now
+                openKeyboard();
+                store((int)i, 0.0f);
+                continue;
+            }
+            if (!strcmp(s.key, "fav_delete"))
+            {
+                deleteFavourite();
                 store((int)i, 0.0f);
                 favChanged = true;
                 continue;
@@ -628,7 +717,7 @@ private:
         for (size_t i = 1; i < t.size(); ++i)
         {
             dirty_[i].store(false);
-            if ((int)i == moveIdx_ || (t[i].flags & (kText | kMomentary))) continue;
+            if ((int)i == moveIdx_ || (t[i].flags & (kText | kMomentary | kLocal))) continue;
             snprintf(val, sizeof(val), "%d", getInt((int)i));
             v2_set_param(inst_, t[i].key, val);
         }
@@ -653,7 +742,7 @@ private:
         for (size_t i = 0; i < t.size(); ++i)
         {
             const ParamSpec& s = t[i];
-            if ((int)i == moveIdx_ || (s.flags & (kText | kMomentary))) continue;
+            if ((int)i == moveIdx_ || (s.flags & (kText | kMomentary | kLocal))) continue;
             if (fresh && now - hostAt_[i].load(std::memory_order_relaxed) < 300) continue;
             buf[0] = 0;
             if (v2_get_param(inst_, s.key, buf, sizeof(buf)) <= 0 || !buf[0]) continue;

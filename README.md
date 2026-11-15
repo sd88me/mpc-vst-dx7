@@ -35,7 +35,7 @@ CARTS: every cart on the device, the 32 patches of the loaded one, and favourite
 - **VOICE**: output, algorithm, feedback, transpose, octave, oscillator sync, the LFO and an interactive pitch envelope.
 - **CARTS**: every `.syx` cart on the device (paged tiles, the current one lit), the 32 patches of the loaded cart, a RANDOM
   button (random cart and patch), and a **favourites** row.
-- **Favourites in the PRESET menu**: +FAV saves the current voice (with your edits); the saved voices appear in MPC's own
+- **Favourites in the PRESET menu**: +FAV opens a keyboard to name the current voice (up to 10 characters; SHIFT, DEL, SPACE, CANCEL, SAVE) and SAVE stores it with your edits; the saved voices appear in MPC's own
   PRESET list, so you can pick them from the track or from a pad. -FAV removes the one you are on. Stored in `favourites.dat`
   in the plugin folder.
 - **ALGO**: the algorithm diagram, the VOICE controls, an operator mixer (ON and level per operator) and **GENERATE**.

@@ -55,16 +55,19 @@ def dump(v, ind=0):
 
 
 # ---- building blocks -----------------------------------------------------------------------------------------------
-def bounds(b, focus="No", visible="Always", invalid="Show"):
-    return {"version": 1, "acceptsHWFocus": focus, "showWhenDataModelInvalid": invalid, "whenVisible": visible,
-            "boundsType": "Absolute", "bounds": b}
+def bounds(b, focus="No", visible="Always", invalid="Show", ind=None):
+    d = {"version": 2 if ind else 1, "acceptsHWFocus": focus, "showWhenDataModelInvalid": invalid, "whenVisible": visible,
+         "boundsType": "Absolute", "bounds": b}
+    if ind:   # shown only while the handle has that index (the naming keyboard: kb_open = 1)
+        d["additionalInvalidatingHandles"] = ind
+    return d
 
 
-def entry(name, typ, data, b, remap=None, focus="No", visible="Always"):
+def entry(name, typ, data, b, remap=None, focus="No", visible="Always", ind=None):
     return {"version": 2,
             "componentData": {"version": 1, "name": name, "type": typ, "data": data},
             "handle remapping": {"version": 1, "map": [{"key": "Data", "value": remap}] if remap else []},
-            "bounds": bounds(b, focus, visible)}
+            "bounds": bounds(b, focus, visible, ind=ind)}
 
 
 def bg(colour="0", image=""):
