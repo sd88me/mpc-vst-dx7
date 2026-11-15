@@ -54,6 +54,8 @@ int main(int, char** argv)
     CHECK(val(open) < 0.5f, "keyboard closed at start");
     press(favSave);
     CHECK(val(open) > 0.5f, "+FAV opens the keyboard");
+    press(ch('5'));
+    CHECK(disp(nm) == "5_", "the first character replaces the voice's name (\"%s\")", disp(nm).c_str());
     for (int i = 0; i < 12; i++) press(bksp);
     CHECK(disp(nm) == "_", "delete empties the name (\"%s\")", disp(nm).c_str());
     press(ch('L')); press(ch('E')); press(ch('A')); press(ch('D')); press(space); press(ch('2')); press(shift); press(ch('X'));
