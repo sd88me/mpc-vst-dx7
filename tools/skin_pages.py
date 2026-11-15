@@ -50,7 +50,7 @@ def slider_strip(w, h=30, style=(TEAL, False, "t")):
 
 def membrane_img(w, h, lit, caption=None, colour=None, number=None):
     key = "mem_%dx%d_%s_%s%s%s.png" % (w, h, "on" if lit else "off", "n%d_" % number if number else "",
-                                     re.sub(r"[^A-Za-z0-9]", "_", (caption or "blank").replace("+", "p").replace("-", "m").replace("<", "prev").replace(">", "next").replace("&", "and")),
+                                     re.sub(r"[^A-Za-z0-9]", "_", ("c%d" % ord(caption) if caption and len(caption) == 1 and (caption.isalnum() or caption == "-") else (caption or "blank")).replace("+", "p").replace("-", "m").replace("<", "prev").replace(">", "next").replace("&", "and")),
                                      "" if colour is None else "_%02x%02x%02x" % colour)
     kw = {"lit": lit, "caption": caption, "number": number}
     if colour is not None:
