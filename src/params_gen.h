@@ -3,7 +3,8 @@
 #include <vector>
 #include <string>
 
-enum ParamFlags { kMomentary = 1, kText = 2 };
+enum ParamFlags { kMomentary = 1, kText = 2, kLocal = 4 };
+static const char kKbChars[] = "1234567890QWERTYUIOPASDFGHJKLZXCVBNM-";   // the character keys from kb_1, then space, delete, shift, cancel, save
 struct ParamSpec {
     enum Kind { Int, Choice };
     const char* key; const char* name; Kind kind;
@@ -243,6 +244,50 @@ static const std::vector<ParamSpec>& paramSpecs() {
     {"gen_amount", "Gen Amount", ParamSpec::Int, 0, 100, 40, 0, {}},
     {"mutate", "Mutate", ParamSpec::Choice, 0, 1, 0, kMomentary, {"off", "go"}},
     {"move", "Move", ParamSpec::Int, 0, 100, 0, 0, {}},
+    {"fav_name", "Favourite Name", ParamSpec::Int, 0, 1023, 0, kText | kLocal, {}},
+    {"kb_open", "Keyboard", ParamSpec::Int, 0, 1, 0, kLocal, {}},
+    {"kb_1", "Key 1", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_2", "Key 2", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_3", "Key 3", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_4", "Key 4", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_5", "Key 5", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_6", "Key 6", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_7", "Key 7", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_8", "Key 8", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_9", "Key 9", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_0", "Key 0", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_q", "Key Q", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_w", "Key W", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_e", "Key E", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_r", "Key R", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_t", "Key T", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_y", "Key Y", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_u", "Key U", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_i", "Key I", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_o", "Key O", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_p", "Key P", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_a", "Key A", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_s", "Key S", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_d", "Key D", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_f", "Key F", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_g", "Key G", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_h", "Key H", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_j", "Key J", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_k", "Key K", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_l", "Key L", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_z", "Key Z", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_x", "Key X", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_c", "Key C", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_v", "Key V", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_b", "Key B", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_n", "Key N", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_m", "Key M", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_dash", "Key -", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_space", "Key Space", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_bksp", "Key Delete", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_shift", "Key Shift", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_cancel", "Key Cancel", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
+    {"kb_save", "Key Save", ParamSpec::Int, 0, 1, 0, kMomentary | kLocal, {}},
     };
     return t;
 }

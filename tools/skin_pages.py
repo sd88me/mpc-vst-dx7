@@ -314,6 +314,44 @@ def tile_frame(w, h, lit):
     return asset("tile_%dx%d_%s.png" % (w, h, "on" if lit else "off"), make)
 
 
+KB_ROWS = [("1234567890", ["kb_bksp"]), ("QWERTYUIOP", []), ("ASDFGHJKL-", []), ("ZXCVBNM", ["kb_space"])]
+
+
+def keyboard(p):
+    """The drawn keyboard for naming a favourite (Profit-5's): a full-page panel, the name, 42 keys; shown while kb_open = 1."""
+    from PIL import Image
+    ind = ["IndexedEnabling/1/2/%s" % tui.P("kb_open")]
+    panel = Image.new("RGB", (1280, 628), (30, 26, 24))
+    d = ImageDraw.Draw(panel)
+    d.rounded_rectangle((42, 14, 1238, 614), 10, outline=(190, 168, 128), width=2)
+    d.text((76, 52), "FAVOURITE NAME", font=art.font(20, 600), fill=(190, 168, 128), anchor="lm")
+    d.rounded_rectangle((330, 26, 1210, 80), 6, fill=(14, 12, 11), outline=art.STORE_RED, width=2)
+    p.kids.append(tui.entry("kb panel", "Image", {"version": 2, "imageType": "Regular", "colour": "0", "image": asset("kb_panel.png", lambda: panel)},
+                            "0 0 1280 628", ind=ind))
+    p.kids.append(tui.entry("kb name", "Label", {"version": 1, "textStyle": tui.text_style(h=32.0, colour="ffe9d6ae", style="Medium",
+                                                                                          just="left verticallyCentred", case="Original"),
+                                                  "type": "Value", "handleName": "Data"}, "346 26 850 54", remap=tui.P("fav_name"), ind=ind))
+    kw, kh, gap, x0, y0 = 98, 74, 8, 70, 108
+
+    def key(k, cap, x, y, w):
+        on, off = membrane_img(w, kh, True, cap), membrane_img(w, kh, False, cap)
+        p.kids.append(tui.entry(k, "Button", {"version": 2, "onImage": on, "offImage": off, "buttonId": 1, "numButtonsInGroup": 1,
+                                               "handleName": "Data", "gestureBehaviour": "Instant"},
+                                "%d %d %d %d" % (x - 6, y - 6, w + 12, kh + 12), remap=tui.P(k), ind=ind))
+    for r, (chars, extra) in enumerate(KB_ROWS):
+        y = y0 + r * (kh + gap)
+        x = x0 + r * 30
+        for c in chars:
+            key("kb_" + ("dash" if c == "-" else c.lower()), c, x, y, kw)
+            x += kw + gap
+        for k in extra:
+            key(k, {"kb_bksp": "DEL", "kb_space": "SPACE"}[k], x, y, 1210 - x)
+    y = y0 + 4 * (kh + gap)
+    key("kb_shift", "SHIFT", x0, y, 200)
+    key("kb_cancel", "CANCEL", 640 - 130, y, 260)
+    key("kb_save", "SAVE", 1210 - 260, y, 260)
+
+
 def carts_page(fn):
     """CARTS: the header (DEXED, LED, LCD); the cart list (22 tiles, momentary bank_slot_N, live names, paged);
     the DX7 1-32 memory-select grid as one 32-button radio group on `preset` (the lit switch is the current patch),
@@ -371,6 +409,7 @@ def carts_page(fn):
         p.kids.append(tui.label("Value", "%d %d 114 24" % (x - 5, y + 65), remap=tui.P("patch_slot_%d" % (i + 1)),
                                 just="horizontallyCentred verticallyCentred", colour="ffe9d6ae", style="Medium", case="Upper Case", h=18.0))
     p.choices["preset"] = [str(i + 1) for i in range(32)]
+    keyboard(p)   # +FAV opens it over the page
     return p
 
 
