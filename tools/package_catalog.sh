@@ -28,7 +28,7 @@ PY
   cp "$SRC/VST/dexed-dx7-$so.so" "$st/dx7_dexed.so"
   cp -r "$SRC/Content/carts" "$st/extra/dx7_carts"
   python3 "$MPC_VST/tools/release.py" --so "$st/dx7_dexed.so" --skin "$st/$DIR" --entry "$here/build/pluginlist-entry.xml" --version "$VER" \
-    --extra "$st/extra/dx7_carts:dx7_carts" --user-data dx7_carts --user-files "$here/userfiles.json" \
+    --extra "$st/extra/dx7_carts:dx7_carts" --user-data dx7_carts --user-data favourites.dat --user-files "$here/userfiles.json" \
     --repo sd88me/mpc-vst-dx7 --license GPL-3.0-only --id dexed-dx7 \
     --requires "MPC OS standalone (Force/Live/One/X/Key) with root SSH access; 44.1 kHz" \
     --about "6-operator FM synthesis (Dexed/MSFA via schwung-dx7), with the DX7-editor LCD touchscreen skin ported from force-dx7." \
