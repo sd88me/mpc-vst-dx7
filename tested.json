@@ -32,5 +32,12 @@
   "firmware": "MPC OS 3.10.1",
   "date": "2026-11-16",
   "note": "Naming keyboard checked with a beta build of this code. A project saved with 2.0.3 was not reloaded."
+ },
+ {
+  "version": "2.0.5",
+  "device": "MPC Live III (Gen2)",
+  "firmware": "MPC OS 3.10.1",
+  "date": "2026-11-18",
+  "note": "Upgraded from 2.0.4 by the OpenMPC Plugin Manager (local zip): a favourite saved with +FAV before the upgrade was kept byte-identical. README backup and restore over SSH tried. Not tried after the upgrade: playing every page, project save and reload."
  }
 ]
