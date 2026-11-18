@@ -66,7 +66,8 @@ CARTS: every cart on the device, the 32 patches of the loaded one, and favourite
 3. Add **Dexed (DX7)** to a track from the plugin browser (Instrument plugins).
 
 The zip's `INSTALL.md` has the manual steps and the uninstall command. Running the installer again upgrades in place, keeping
-your own carts and favourites. After replacing the plugin file on a running device, remove and re-insert the plugin on any
+your own carts and favourites (releases up to 2.0.4 replace `favourites.dat` on upgrade, so back it up first: see
+[Backing up your favourites and sounds](#backing-up-your-favourites-and-sounds)). After replacing the plugin file on a running device, remove and re-insert the plugin on any
 track that uses it.
 
 ### Bank and patch carts
@@ -74,6 +75,49 @@ track that uses it.
 The plugin reads `.syx` files from the `dx7_carts` folder inside its own plugin folder
 (`/sdcard/Synths/sd88me - VST - Dexed (DX7)/dx7_carts`). The installer puts the factory banks there; drop your own files in the
 same folder and they appear in the cart list on the CARTS page and on the LCD.
+
+## Backing up your favourites and sounds
+
+Your favourites and your own files are kept in the plugin folder on the MPC, not in your projects (a project keeps only the sound its
+track uses). Back them up before you update the plugin or MPC OS, reset the device, or move to another MPC. These are the files to keep,
+inside the plugin folder `sd88me - VST - Dexed (DX7)`:
+
+| File or folder | What it holds |
+|---|---|
+| `favourites.dat` | your favourites (+FAV) |
+| `dx7_carts/` | your carts (and the factory ones) |
+
+### Where the plugin folder is
+It is in `VST2 Plugins` on one of the MPC's drives, or in a Synths folder (`/sdcard/Synths`, or `/nvme/Synths` on a Live III),
+depending on how Dexed (DX7) was installed. Over SSH (root access), this prints its path:
+
+```bash
+ssh root@<device-ip> 'find /sdcard /nvme /media -maxdepth 3 -type d -name "sd88me - VST - Dexed (DX7)" 2>/dev/null'
+```
+
+### Backing up
+- **The plugin folder is on an SD card or USB drive:** plug the drive into a computer and copy the files above to it.
+- **Over SSH**, from a computer: this copies the whole plugin folder into one file, `dx7-backup.tar`. Put the folder that holds the
+  plugin folder (the path above without its last part) in place of `<parent folder>`:
+
+  ```bash
+  ssh root@<device-ip> 'cd "<parent folder>" && tar cf - "sd88me - VST - Dexed (DX7)"' > dx7-backup.tar
+  ```
+
+### Restoring
+Install Dexed (DX7) first (on the new device, or after the reset or update), then put back only the files above. Don't copy the whole
+old folder over the new one: that would put the old version of the plugin back too.
+
+- **From a drive:** copy the files back to the same places in the new plugin folder.
+- **Over SSH:** unpack the backup on your computer and send the files back. List only the ones your backup has, and put the new
+  plugin folder's path (found as above) in place of `<plugin folder>`:
+
+  ```bash
+  mkdir dx7-backup && tar xf dx7-backup.tar -C dx7-backup
+  tar cf - -C "dx7-backup/sd88me - VST - Dexed (DX7)" "favourites.dat" "dx7_carts" | ssh root@<device-ip> 'cd "<plugin folder>" && tar xf -'
+  ```
+
+Then remove Dexed (DX7) from its tracks and add it again (or reopen the project), so it reads the restored files.
 
 ## Build from source
 
